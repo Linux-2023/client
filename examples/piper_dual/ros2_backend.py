@@ -169,11 +169,15 @@ class Ros2BackendClient:
                     self._set_error(str(exc))
                     break
             else:
-                returncode = self.process.wait(timeout=0.1) if self.process is not None else None
-                if returncode is not None and returncode != 0:
-                    self._set_error(self._format_exit_error(f"bridge exited with status {returncode}"), priority=20)
-                else:
+                try:
+                    returncode = self.process.wait(timeout=0.1) if self.process is not None else None
+                except subprocess.TimeoutExpired:
                     self._set_error(self._format_exit_error("stdout closed before bridge exited"), priority=10)
+                else:
+                    if returncode is not None and returncode != 0:
+                        self._set_error(self._format_exit_error(f"bridge exited with status {returncode}"), priority=20)
+                    else:
+                        self._set_error(self._format_exit_error("stdout closed before bridge exited"), priority=10)
         finally:
             self._stop_event.set()
             if self.process is not None:

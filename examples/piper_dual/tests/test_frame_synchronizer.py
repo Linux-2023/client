@@ -73,6 +73,29 @@ def test_nearest_neighbor_matching_within_thirty_milliseconds():
     assert sync.accepted_frames == 1
 
 
+
+def test_reference_remains_pending_until_late_in_window_sample_arrives():
+    sync = FrameSynchronizer(max_error=0.03)
+    sync.push("cam_high", 10.0, b"reference")
+    sync.push("cam_left_wrist", 9.950, b"older-left")
+    sync.push("cam_right_wrist", 10.0, b"right")
+    sync.push("puppet_left", 10.0, joint_values(0))
+    sync.push("puppet_right", 10.0, joint_values(10))
+    sync.push("master_left", 10.0, joint_values(20))
+    sync.push("master_right", 10.0, joint_values(30))
+
+    assert sync.try_sync() is None
+    assert sync.rejected_stale == 0
+
+    sync.push("cam_left_wrist", 10.020, b"late-valid-left")
+    frame = sync.try_sync()
+
+    assert frame is not None
+    assert frame.timestamp == pytest.approx(10.0)
+    assert frame.images["cam_left_wrist"] == b"late-valid-left"
+    assert frame.sync_error["cam_left_wrist"] == pytest.approx(0.020)
+    assert sync.accepted_frames == 1
+
 def test_rejects_reference_when_any_required_stream_is_missing_or_outside_window():
     missing = FrameSynchronizer(max_error=0.03)
     for sensor in ALL_SENSORS:
@@ -134,6 +157,15 @@ def test_two_second_buffer_eviction_removes_old_samples():
     assert sync.buffered_counts["cam_left_wrist"] == 0
     assert sync.try_sync() is None
 
+
+
+def test_eviction_uses_latest_observed_timestamp_for_out_of_order_samples():
+    sync = FrameSynchronizer(max_error=0.03, max_buffer_seconds=2.0)
+    sync.push("cam_high", 10.0, b"new-reference")
+    sync.push("cam_left_wrist", 7.9, b"out-of-order-old-left")
+
+    assert sync.buffered_counts["cam_high"] == 1
+    assert sync.buffered_counts["cam_left_wrist"] == 0
 
 def test_clear_removes_samples_and_resets_episode_boundary_state():
     sync = FrameSynchronizer(max_error=0.03)

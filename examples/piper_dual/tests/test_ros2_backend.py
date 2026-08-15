@@ -245,6 +245,25 @@ def test_protocol_errors_bridge_errors_eof_stderr_and_non_zero_exit_surface_with
     client.close()
 
 
+
+def test_stdout_eof_from_live_bridge_surfaces_bridge_failure_not_generic_timeout(tmp_path, monkeypatch):
+    bridge = write_fake_bridge(
+        tmp_path,
+        """
+        import os
+        print(json.dumps({"type": "status", "state": "ready"}), flush=True)
+        os.close(sys.stdout.fileno())
+        time.sleep(2.0)
+        """
+    )
+    monkeypatch.setattr(ros2_backend, "BRIDGE_SCRIPT", bridge)
+    client = Ros2BackendClient(bridge_python=Path(sys.executable), config=write_config(tmp_path))
+
+    client.start()
+    with pytest.raises(RuntimeError, match="stdout closed before bridge exited"):
+        client.next_frame(timeout=1.0)
+    client.close()
+
 def test_timeout_raises_timeouterror_without_killing_live_bridge(tmp_path, monkeypatch):
     bridge = write_fake_bridge(
         tmp_path,

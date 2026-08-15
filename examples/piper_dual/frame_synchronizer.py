@@ -45,6 +45,7 @@ class FrameSynchronizer:
         self.rejected_late = 0
         self.rejected_invalid = 0
         self._last_emitted_reference: float | None = None
+        self._latest_observed_timestamp: float | None = None
 
     @property
     def buffered_counts(self) -> dict[str, int]:
@@ -54,6 +55,7 @@ class FrameSynchronizer:
         for samples in self._buffers.values():
             samples.clear()
         self._last_emitted_reference = None
+        self._latest_observed_timestamp = None
 
     def push(self, sensor: str, timestamp: float, value: object) -> None:
         try:
@@ -73,7 +75,9 @@ class FrameSynchronizer:
             samples.insert(index, _Sample(timestamp, value))
         else:
             samples.append(_Sample(timestamp, value))
-        self._evict_old_samples(timestamp)
+        if self._latest_observed_timestamp is None or timestamp > self._latest_observed_timestamp:
+            self._latest_observed_timestamp = timestamp
+        self._evict_old_samples()
 
     def try_sync(self, reference_sensor: str = "cam_high") -> SynchronizedFrame | None:
         self._validate_sensor(reference_sensor)
@@ -90,17 +94,21 @@ class FrameSynchronizer:
                 continue
 
             selected: dict[str, _Sample] = {reference_sensor: reference}
-            missing = False
+            pending = False
             stale = False
             for sensor in REQUIRED_SENSORS:
                 if sensor == reference_sensor:
                     continue
                 sample = self._nearest_sample(sensor, reference.timestamp)
                 if sample is None:
-                    missing = True
+                    pending = True
+                    self.rejected_missing += 1
                     break
                 if abs(sample.timestamp - reference.timestamp) > self.max_error:
-                    stale = True
+                    if self._stream_advanced_beyond(sensor, reference.timestamp + self.max_error):
+                        stale = True
+                    else:
+                        pending = True
                     break
                 selected[sensor] = sample
 
@@ -112,9 +120,8 @@ class FrameSynchronizer:
                 self.rejected_stale += 1
                 continue
 
-            if missing:
-                self.rejected_missing += 1
-                continue
+            if pending:
+                return None
 
             frame = self._build_frame(reference_sensor, reference.timestamp, selected)
             self._last_emitted_reference = reference.timestamp
@@ -157,14 +164,20 @@ class FrameSynchronizer:
             return None
         return min(samples, key=lambda sample: (abs(sample.timestamp - timestamp), sample.timestamp))
 
+    def _stream_advanced_beyond(self, sensor: str, timestamp: float) -> bool:
+        samples = self._buffers[sensor]
+        return bool(samples and samples[-1].timestamp > timestamp)
+
     def _discard_consumed_samples(self, selected: dict[str, _Sample]) -> None:
         for sensor, used in selected.items():
             samples = self._buffers[sensor]
             while samples and samples[0].timestamp <= used.timestamp:
                 samples.popleft()
 
-    def _evict_old_samples(self, latest_timestamp: float) -> None:
-        cutoff = latest_timestamp - self.max_buffer_seconds
+    def _evict_old_samples(self) -> None:
+        if self._latest_observed_timestamp is None:
+            return
+        cutoff = self._latest_observed_timestamp - self.max_buffer_seconds
         for samples in self._buffers.values():
             while samples and samples[0].timestamp < cutoff:
                 samples.popleft()
