@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from datetime import UTC
+from datetime import timezone
 from datetime import datetime
 from enum import Enum
 import json
@@ -128,6 +128,7 @@ class CollectorController:
         self.state = CollectorState.PREVIEW
         self._writer: StreamingEpisodeWriter | None = None
         self._current_path: Path | None = None
+        self._active_frame_count = 0
         self._next_episode_index = 0
         self._closed = False
 
@@ -144,12 +145,13 @@ class CollectorController:
         final_path = self._next_episode_path()
         metadata = {
             "prompt": self.prompt,
-            "created_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "collector": "collect_data_ros2.py",
             "source": "ros2_bridge",
         }
         self._writer = self._writer_factory(final_path, metadata=metadata, jpeg_quality=self.jpeg_quality)
         self._current_path = final_path
+        self._active_frame_count = 0
         self.state = CollectorState.RECORDING
         print(f"Recording {final_path.with_suffix(final_path.suffix + '.partial')} (press e to finalize, q to abort)")
 
@@ -160,8 +162,14 @@ class CollectorController:
             return self._current_path
         self.state = CollectorState.FINALIZING
         writer = self._writer
+        if self._active_frame_count == 0:
+            return self._abort_current_episode(writer, "episode contains zero frames", remove_partial=True)
+        try:
+            final_path = writer.finalize()
+        except ValueError as exc:
+            return self._abort_current_episode(writer, str(exc), remove_partial=True)
         self._writer = None
-        final_path = writer.finalize()
+        self._active_frame_count = 0
         report = self._validator(final_path)
         self._report_sink(report)
         if self._render_after_save:
@@ -170,6 +178,19 @@ class CollectorController:
         self.state = CollectorState.PREVIEW
         print(f"Finalized {final_path} (press s for another episode, q to quit)")
         return final_path
+
+    def _abort_current_episode(self, writer: StreamingEpisodeWriter, reason: str, *, remove_partial: bool) -> Path:
+        partial_path = writer.partial_path
+        try:
+            writer.abort(remove_partial=remove_partial)
+        finally:
+            self._writer = None
+            self._current_path = None
+            self._active_frame_count = 0
+            self.state = CollectorState.PREVIEW
+        policy = "Removed" if remove_partial else "Retained"
+        print(f"Failed to finalize episode: {reason}. {policy} partial {partial_path}. Press s to try another episode, q to quit.")
+        return Path()
 
     def handle_key(self, key: str | None) -> CollectorState:
         if key is None:
@@ -188,6 +209,7 @@ class CollectorController:
         key = self._preview.render(frame, self.state, self.prompt) if self._preview is not None else None
         if self.state is CollectorState.RECORDING and self._writer is not None:
             self._writer.append(frame)
+            self._active_frame_count += 1
         if key is not None:
             self.handle_key(key)
         return key
@@ -200,6 +222,7 @@ class CollectorController:
         if self._writer is not None:
             self._writer.abort(remove_partial=True)
             self._writer = None
+            self._active_frame_count = 0
         if self._preview is not None:
             self._preview.close()
         self.backend.close()

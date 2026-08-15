@@ -236,6 +236,85 @@ def test_repeated_episodes_skip_existing_outputs_and_use_distinct_files(tmp_path
     assert len({writer.partial_path for writer in writer_factory.writers}) == 2
 
 
+
+def test_empty_real_writer_episode_restores_preview_keeps_backend_and_next_valid_episode_succeeds(
+    tmp_path: Path, capsys
+) -> None:
+    backend = FakeBackend()
+    reports: list[dict] = []
+    controller = make_controller(
+        tmp_path,
+        backend=backend,
+        writer_factory=StreamingEpisodeWriter.open,
+        reports=reports,
+        validator=validate_episode,
+    )
+
+    assert controller.handle_key("s") is CollectorState.RECORDING
+    assert controller.handle_key("e") is CollectorState.PREVIEW
+
+    final_path = tmp_path / "episode_000000.hdf5"
+    partial_path = tmp_path / "episode_000000.hdf5.partial"
+    assert controller.state is CollectorState.PREVIEW
+    assert controller.writer_open is False
+    assert backend.close_calls == 0
+    assert not final_path.exists()
+    assert not partial_path.exists()
+    assert reports == []
+    output = capsys.readouterr().out
+    assert "Failed to finalize" in output
+    assert "zero frames" in output
+
+    assert controller.handle_key("s") is CollectorState.RECORDING
+    controller.process_frame(render_frame(10))
+    assert controller.handle_key("e") is CollectorState.PREVIEW
+
+    next_final_path = tmp_path / "episode_000001.hdf5"
+    assert next_final_path.exists()
+    assert validate_episode(next_final_path)["errors"] == []
+    assert reports[-1]["frame_count"] == 1
+    assert backend.close_calls == 0
+
+
+def test_real_writer_validation_failure_restores_preview_removes_partial_and_allows_next_valid_episode(
+    tmp_path: Path, capsys
+) -> None:
+    backend = FakeBackend()
+    reports: list[dict] = []
+    controller = make_controller(
+        tmp_path,
+        backend=backend,
+        writer_factory=StreamingEpisodeWriter.open,
+        reports=reports,
+        validator=validate_episode,
+    )
+
+    assert controller.handle_key("s") is CollectorState.RECORDING
+    controller.process_frame(make_frame(11))
+    assert controller.handle_key("e") is CollectorState.PREVIEW
+
+    failed_final_path = tmp_path / "episode_000000.hdf5"
+    failed_partial_path = tmp_path / "episode_000000.hdf5.partial"
+    assert controller.state is CollectorState.PREVIEW
+    assert controller.writer_open is False
+    assert backend.close_calls == 0
+    assert not failed_final_path.exists()
+    assert not failed_partial_path.exists()
+    assert reports == []
+    output = capsys.readouterr().out
+    assert "Failed to finalize" in output
+    assert "not decodable JPEG bytes" in output
+
+    assert controller.handle_key("s") is CollectorState.RECORDING
+    controller.process_frame(render_frame(12))
+    assert controller.handle_key("e") is CollectorState.PREVIEW
+
+    next_final_path = tmp_path / "episode_000001.hdf5"
+    assert next_final_path.exists()
+    assert validate_episode(next_final_path)["errors"] == []
+    assert reports[-1]["frame_count"] == 1
+    assert backend.close_calls == 0
+
 def test_q_aborts_open_partial_and_closes_backend_without_publishing_actions(tmp_path: Path) -> None:
     backend = FakeBackend()
     writer_factory = RecordingWriterFactory()
