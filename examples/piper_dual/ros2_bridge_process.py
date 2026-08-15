@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """ROS 2 sidecar process for the Piper dual bridge JSON-line protocol."""
 
 from __future__ import annotations

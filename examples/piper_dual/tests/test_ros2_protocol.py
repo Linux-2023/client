@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import json
+import math
 import sys
 
 import pytest
@@ -35,6 +36,18 @@ def test_decode_message_rejects_blank_malformed_and_non_object_json():
     for line in bad_lines:
         with pytest.raises(ValueError):
             decode_message(line)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_decode_message_rejects_non_finite_json_constants(constant):
+    with pytest.raises(ValueError, match="not valid JSON"):
+        decode_message(f'{{"type":"sensor","value":{constant}}}\n')
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_encode_message_rejects_non_finite_numbers(value):
+    with pytest.raises(ValueError, match="not valid JSON"):
+        encode_message({"type": "sensor", "value": value})
 
 
 def test_encode_message_rejects_non_object_messages():

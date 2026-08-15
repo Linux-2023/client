@@ -7,11 +7,18 @@ from typing import Any
 JsonObject = dict[str, Any]
 
 
+def _reject_constant(_: str) -> None:
+    raise ValueError("Protocol message is not valid JSON")
+
+
 def encode_message(message: JsonObject) -> str:
     """Encode one protocol message as compact JSON followed by a newline."""
     if not isinstance(message, dict):
         raise ValueError("Protocol messages must be JSON objects")
-    return json.dumps(message, separators=(",", ":"), ensure_ascii=False) + "\n"
+    try:
+        return json.dumps(message, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n"
+    except ValueError as exc:
+        raise ValueError("Protocol message is not valid JSON") from exc
 
 
 def decode_message(line: str) -> JsonObject:
@@ -20,8 +27,8 @@ def decode_message(line: str) -> JsonObject:
         raise ValueError("Protocol messages must not be blank")
 
     try:
-        message = json.loads(line)
-    except json.JSONDecodeError as exc:
+        message = json.loads(line, parse_constant=_reject_constant)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError("Protocol message is not valid JSON") from exc
 
     if not isinstance(message, dict):
