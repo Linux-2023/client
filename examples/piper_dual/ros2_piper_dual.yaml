@@ -1,0 +1,71 @@
+schema_version: piper_dual_ros2_v1
+max_sync_error_ms: 30
+jpeg_quality: 90
+model_image:
+  width: 224
+  height: 224
+  channel_order: RGB
+  layout: CHW
+  dtype: uint8
+cameras:
+  - name: cam_high
+    topic: /camera_f_l/color/image_raw
+    width: 224
+    height: 224
+    rotate_degrees: 0
+  - name: cam_left_wrist
+    topic: /camera_l/color/image_raw
+    width: 224
+    height: 224
+    rotate_degrees: 0
+  - name: cam_right_wrist
+    topic: /camera_r/color/image_raw
+    width: 224
+    height: 224
+    rotate_degrees: 0
+state:
+  name: observation.state
+  dtype: float32
+  order: left_then_right
+  arms:
+    - puppet_left_7
+    - puppet_right_7
+  joint_names:
+    - J1
+    - J2
+    - J3
+    - J4
+    - J5
+    - J6
+    - gripper
+  joint_units:
+    - rad
+    - rad
+    - rad
+    - rad
+    - rad
+    - rad
+    - m
+action:
+  name: action
+  dtype: float32
+  order: left_then_right
+  arms:
+    - master_left_7
+    - master_right_7
+  joint_names:
+    - J1
+    - J2
+    - J3
+    - J4
+    - J5
+    - J6
+    - gripper
+  joint_units:
+    - rad
+    - rad
+    - rad
+    - rad
+    - rad
+    - rad
+    - m
