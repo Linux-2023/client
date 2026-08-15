@@ -223,7 +223,10 @@ class PiperRos2Bridge(Node):
             self._mode = mode
             self._writer.status("mode_set", mode=self._mode)
         elif request_type == "ping":
-            self._writer.status("pong")
+            metadata: dict[str, Any] = {}
+            if "id" in request:
+                metadata["id"] = request.get("id")
+            self._writer.status("pong", **metadata)
         elif request_type == "stop":
             self._writer.write({"type": "stopped"})
             self._stop_event.set()

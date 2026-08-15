@@ -90,3 +90,49 @@ Bytecode verification:
 $ /usr/bin/python3 -m py_compile examples/piper_dual/frame_synchronizer.py examples/piper_dual/ros2_backend.py
 (no output)
 ```
+
+## Review fixes 2 — 2026-08-16
+
+Fixed the three remaining Important Task 3 review findings:
+- Added strict raw backend joint sensor decoding before NumPy conversion: `values` must be a list/tuple of exactly seven real JSON numbers, booleans and numeric strings are rejected, and every value must be finite.
+- Added a strong `clear_buffers()` episode barrier using the existing bridge `ping` request with a correlated `pong` response. The backend clears local state, sends ping, waits until the reader reaches the matching pong after processing earlier stdout, clears local state again, then releases the reader so only post-barrier samples can form the next frame.
+- Added immediate backend error wakeup by enqueueing an internal sentinel when `_set_error()` stores an error, so `next_frame()` callers blocked with long timeouts raise promptly on bridge error, EOF, or nonzero exit.
+
+Regression RED:
+
+```text
+$ /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_backend.py::test_raw_joint_sensor_values_are_validated_before_numpy_coercion examples/piper_dual/tests/test_ros2_backend.py::test_clear_buffers_uses_ping_barrier_to_exclude_pre_barrier_stdout examples/piper_dual/tests/test_ros2_backend.py::test_next_frame_wakes_promptly_for_asynchronous_backend_errors -q
+FAILED examples/piper_dual/tests/test_ros2_backend.py::test_raw_joint_sensor_values_are_validated_before_numpy_coercion[values0-real JSON numbers]
+FAILED examples/piper_dual/tests/test_ros2_backend.py::test_raw_joint_sensor_values_are_validated_before_numpy_coercion[values1-real JSON numbers]
+FAILED examples/piper_dual/tests/test_ros2_backend.py::test_raw_joint_sensor_values_are_validated_before_numpy_coercion[values2-exactly seven]
+FAILED examples/piper_dual/tests/test_ros2_backend.py::test_raw_joint_sensor_values_are_validated_before_numpy_coercion[values3-finite]
+FAILED examples/piper_dual/tests/test_ros2_backend.py::test_raw_joint_sensor_values_are_validated_before_numpy_coercion[values4-list or tuple]
+FAILED examples/piper_dual/tests/test_ros2_backend.py::test_clear_buffers_uses_ping_barrier_to_exclude_pre_barrier_stdout
+FAILED examples/piper_dual/tests/test_ros2_backend.py::test_next_frame_wakes_promptly_for_asynchronous_backend_errors[async bridge error]
+FAILED examples/piper_dual/tests/test_ros2_backend.py::test_next_frame_wakes_promptly_for_asynchronous_backend_errors[bridge exited with status 6]
+pytest: 8 failed in 4.15s
+Command exited with code 1
+```
+
+Regression GREEN:
+
+```text
+$ /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_backend.py::test_raw_joint_sensor_values_are_validated_before_numpy_coercion examples/piper_dual/tests/test_ros2_backend.py::test_clear_buffers_uses_ping_barrier_to_exclude_pre_barrier_stdout examples/piper_dual/tests/test_ros2_backend.py::test_next_frame_wakes_promptly_for_asynchronous_backend_errors -q
+........                                                                 [100%]
+8 passed in 0.53s
+```
+
+Focused verification:
+
+```text
+$ /usr/bin/python3 -m pytest examples/piper_dual/tests/test_frame_synchronizer.py examples/piper_dual/tests/test_ros2_backend.py -q
+.....................................                                    [100%]
+37 passed in 3.79s
+```
+
+Bytecode verification:
+
+```text
+$ /usr/bin/python3 -m py_compile examples/piper_dual/frame_synchronizer.py examples/piper_dual/ros2_backend.py /home/agilex/client/.worktrees/piper-dual-ros2-migration/examples/piper_dual/ros2_bridge_process.py
+(no output)
+```

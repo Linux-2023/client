@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import base64
 import json
+import math
 import queue
 import subprocess
 import threading
@@ -27,6 +28,7 @@ DEFAULT_SYNC_ERROR = 0.03
 DEFAULT_BUFFER_SECONDS = 2.0
 STDERR_LOG_LIMIT = 32
 PROCESS_SHUTDOWN_TIMEOUT = 5.0
+_ERROR_SENTINEL = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,12 +54,17 @@ class Ros2BackendClient:
         self._reader_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._frame_queue: queue.Queue[SynchronizedFrame] = queue.Queue(maxsize=self.complete_frame_queue_size)
+        self._frame_queue: queue.Queue[SynchronizedFrame | object] = queue.Queue(maxsize=self.complete_frame_queue_size)
         self._stdin_lock = threading.Lock()
         self._error_lock = threading.Lock()
         self._frame_lock = threading.Lock()
+        self._clear_lock = threading.Lock()
+        self._barrier_condition = threading.Condition()
         self._backend_error: _BackendError | None = None
         self._stderr_lines: deque[str] = deque(maxlen=STDERR_LOG_LIMIT)
+        self._pending_ping_barrier_id: str | None = None
+        self._ping_barrier_reached = False
+        self._ping_barrier_released = False
         self._dropped_complete_frames = 0
         self._started = False
         self._closed = False
@@ -100,16 +107,26 @@ class Ros2BackendClient:
         self._ensure_started()
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
-        self._raise_if_error()
-        try:
-            frame = self._frame_queue.get(timeout=timeout)
-        except queue.Empty as exc:
+        deadline = time.monotonic() + timeout
+        while True:
             self._raise_if_error()
-            if self.process is not None and self.process.poll() is not None:
-                self._raise_if_error(default=f"bridge exited before producing a synchronized frame (status {self.process.returncode})")
-            raise TimeoutError("Timed out waiting for a synchronized frame") from exc
-        self._raise_if_error()
-        return frame
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if self.process is not None and self.process.poll() is not None:
+                    self._raise_if_error(default=f"bridge exited before producing a synchronized frame (status {self.process.returncode})")
+                raise TimeoutError("Timed out waiting for a synchronized frame")
+            try:
+                frame = self._frame_queue.get(timeout=remaining)
+            except queue.Empty as exc:
+                self._raise_if_error()
+                if self.process is not None and self.process.poll() is not None:
+                    self._raise_if_error(default=f"bridge exited before producing a synchronized frame (status {self.process.returncode})")
+                raise TimeoutError("Timed out waiting for a synchronized frame") from exc
+            if frame is _ERROR_SENTINEL:
+                self._raise_if_error(default="Bridge failed while waiting for a synchronized frame")
+                continue
+            self._raise_if_error()
+            return frame
 
     def publish_action(self, action: np.ndarray) -> None:
         self._ensure_started()
@@ -117,13 +134,22 @@ class Ros2BackendClient:
         self._send_request(request)
 
     def clear_buffers(self) -> None:
-        with self._frame_lock:
-            self.synchronizer.clear()
-            while True:
-                try:
-                    self._frame_queue.get_nowait()
-                except queue.Empty:
-                    break
+        self._ensure_started()
+        self._raise_if_error()
+        with self._clear_lock:
+            self._clear_frame_state()
+            barrier_id = str(time.monotonic_ns())
+            with self._barrier_condition:
+                self._pending_ping_barrier_id = barrier_id
+                self._ping_barrier_reached = False
+                self._ping_barrier_released = False
+            try:
+                self._send_request({"type": "ping", "id": barrier_id})
+                self._wait_for_ping_barrier(barrier_id)
+                self._clear_frame_state()
+            finally:
+                self._release_ping_barrier(barrier_id)
+            self._raise_if_error()
 
     def close(self) -> None:
         if self._closed:
@@ -149,6 +175,8 @@ class Ros2BackendClient:
                     self.process.kill()
                     self.process.wait(timeout=PROCESS_SHUTDOWN_TIMEOUT)
         self._stop_event.set()
+        with self._barrier_condition:
+            self._barrier_condition.notify_all()
         if self._reader_thread is not None:
             self._reader_thread.join(timeout=PROCESS_SHUTDOWN_TIMEOUT)
         if self._stderr_thread is not None:
@@ -193,6 +221,7 @@ class Ros2BackendClient:
     def _handle_message(self, message: dict[str, Any]) -> None:
         message_type = message.get("type")
         if message_type == "status":
+            self._handle_status_message(message)
             return
         if message_type == "error":
             raise RuntimeError(str(message.get("message", "bridge error")))
@@ -207,7 +236,7 @@ class Ros2BackendClient:
         if "jpeg_b64" in message:
             value = self._decode_jpeg_payload(message["jpeg_b64"])
         elif "values" in message:
-            value = np.asarray(message["values"], dtype=np.float32)
+            value = self._decode_joint_payload(message["values"])
         else:
             raise RuntimeError("sensor event must contain jpeg_b64 or values")
 
@@ -236,6 +265,66 @@ class Ros2BackendClient:
         except (UnicodeEncodeError, ValueError) as exc:
             raise RuntimeError("sensor image payload is not valid base64") from exc
 
+    def _decode_joint_payload(self, payload: object) -> np.ndarray:
+        if not isinstance(payload, (list, tuple)):
+            raise RuntimeError("joint sensor values must be a list or tuple")
+        if len(payload) != 7:
+            raise RuntimeError("joint sensor values must contain exactly seven values")
+
+        values: list[float] = []
+        for raw_value in payload:
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                raise RuntimeError("joint sensor values must be real JSON numbers")
+            value = float(raw_value)
+            if not math.isfinite(value):
+                raise RuntimeError("joint sensor values must be finite")
+            values.append(value)
+        return np.asarray(values, dtype=np.float32)
+
+    def _handle_status_message(self, message: dict[str, Any]) -> None:
+        if message.get("state") != "pong":
+            return
+        metadata = message.get("metadata")
+        pong_id = metadata.get("id") if isinstance(metadata, dict) else message.get("id")
+        with self._barrier_condition:
+            pending_id = self._pending_ping_barrier_id
+            if pending_id is None:
+                return
+            if pong_id is not None and str(pong_id) != pending_id:
+                return
+            self._ping_barrier_reached = True
+            self._barrier_condition.notify_all()
+            while self._pending_ping_barrier_id == pending_id and not self._ping_barrier_released and not self._stop_event.is_set():
+                self._barrier_condition.wait(timeout=0.05)
+
+    def _clear_frame_state(self) -> None:
+        with self._frame_lock:
+            self.synchronizer.clear()
+            while True:
+                try:
+                    self._frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+
+    def _wait_for_ping_barrier(self, barrier_id: str) -> None:
+        deadline = time.monotonic() + PROCESS_SHUTDOWN_TIMEOUT
+        with self._barrier_condition:
+            while self._pending_ping_barrier_id == barrier_id and not self._ping_barrier_reached:
+                self._raise_if_error()
+                if self.process is not None and self.process.poll() is not None:
+                    self._raise_if_error(default=f"bridge exited before acknowledging ping barrier (status {self.process.returncode})")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for bridge ping barrier")
+                self._barrier_condition.wait(timeout=min(0.05, remaining))
+
+    def _release_ping_barrier(self, barrier_id: str | None = None) -> None:
+        with self._barrier_condition:
+            if barrier_id is None or self._pending_ping_barrier_id == barrier_id:
+                self._pending_ping_barrier_id = None
+                self._ping_barrier_released = True
+                self._barrier_condition.notify_all()
+
     def _send_request(self, request: dict[str, Any]) -> None:
         if self.process is None or self.process.stdin is None:
             raise RuntimeError("Bridge process has not been started")
@@ -247,15 +336,38 @@ class Ros2BackendClient:
             self.process.stdin.flush()
 
     def _set_error(self, message: str, priority: int = 10) -> None:
+        changed = False
         with self._error_lock:
             if self._backend_error is None or priority >= self._backend_error.priority:
                 self._backend_error = _BackendError(message, priority)
+                changed = True
+        if changed:
+            self._wake_frame_waiters()
+            with self._barrier_condition:
+                self._barrier_condition.notify_all()
 
     def _raise_if_error(self, default: str | None = None) -> None:
-        if self._backend_error is not None:
-            raise RuntimeError(self._backend_error.message)
+        with self._error_lock:
+            error = self._backend_error
+        if error is not None:
+            raise RuntimeError(error.message)
         if default is not None:
             raise RuntimeError(default)
+
+    def _wake_frame_waiters(self) -> None:
+        try:
+            self._frame_queue.put_nowait(_ERROR_SENTINEL)
+            return
+        except queue.Full:
+            pass
+        try:
+            self._frame_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            self._frame_queue.put_nowait(_ERROR_SENTINEL)
+        except queue.Full:
+            pass
 
     def _format_exit_error(self, message: str) -> str:
         stderr = "; ".join(self._stderr_lines)

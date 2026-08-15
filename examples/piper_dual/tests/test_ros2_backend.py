@@ -140,6 +140,23 @@ def test_next_frame_returns_only_a_complete_synchronized_frame(tmp_path, monkeyp
     np.testing.assert_array_equal(frame.state, np.array(list(range(7)) + list(range(10, 17)), dtype=np.float32))
 
 
+@pytest.mark.parametrize(
+    ("values", "match"),
+    [
+        ([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, "6.0"], "real JSON numbers"),
+        ([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, True], "real JSON numbers"),
+        ([0.0, 1.0, 2.0, 3.0, 4.0, 5.0], "exactly seven"),
+        ([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, float("inf")], "finite"),
+        ({"joint0": 0.0}, "list or tuple"),
+    ],
+)
+def test_raw_joint_sensor_values_are_validated_before_numpy_coercion(tmp_path, values, match):
+    client = Ros2BackendClient(bridge_python=Path(sys.executable), config=write_config(tmp_path))
+
+    with pytest.raises(RuntimeError, match=match):
+        client._handle_message({"type": "sensor", "sensor": "puppet_left", "timestamp": 1.0, "values": values})
+
+
 def test_clear_buffers_drops_queued_frames_and_synchronizer_state(tmp_path, monkeypatch):
     events = complete_events(3.0) + complete_events(4.0)
     bridge = write_fake_bridge(
@@ -149,7 +166,10 @@ def test_clear_buffers_drops_queued_frames_and_synchronizer_state(tmp_path, monk
         for event in __EVENTS__:
             print(json.dumps(event), flush=True)
         for line in sys.stdin:
-            if json.loads(line).get("type") == "stop":
+            request = json.loads(line)
+            if request.get("type") == "ping":
+                print(json.dumps({"type": "status", "state": "pong", "metadata": {"id": request.get("id")}}), flush=True)
+            if request.get("type") == "stop":
                 break
         """.replace("__EVENTS__", repr(events)),
     )
@@ -164,6 +184,34 @@ def test_clear_buffers_drops_queued_frames_and_synchronizer_state(tmp_path, monk
     client.close()
 
     assert first.timestamp == pytest.approx(3.0)
+
+
+def test_clear_buffers_uses_ping_barrier_to_exclude_pre_barrier_stdout(tmp_path, monkeypatch):
+    bridge = write_fake_bridge(
+        tmp_path,
+        """
+        print(json.dumps({"type": "status", "state": "ready"}), flush=True)
+        for event in __PRE_EVENTS__:
+            print(json.dumps(event), flush=True)
+        for line in sys.stdin:
+            request = json.loads(line)
+            if request.get("type") == "ping":
+                print(json.dumps({"type": "status", "state": "pong", "metadata": {"id": request.get("id")}}), flush=True)
+                for event in __POST_EVENTS__:
+                    print(json.dumps(event), flush=True)
+            if request.get("type") == "stop":
+                break
+        """.replace("__PRE_EVENTS__", repr(complete_events(7.0))).replace("__POST_EVENTS__", repr(complete_events(8.0))),
+    )
+    monkeypatch.setattr(ros2_backend, "BRIDGE_SCRIPT", bridge)
+    client = Ros2BackendClient(bridge_python=Path(sys.executable), config=write_config(tmp_path))
+
+    client.start()
+    client.clear_buffers()
+    frame = client.next_frame(timeout=1.0)
+    client.close()
+
+    assert frame.timestamp == pytest.approx(8.0)
 
 
 def test_publish_action_sends_validated_fourteen_dimension_request_and_rejects_malformed_actions(tmp_path, monkeypatch):
@@ -243,6 +291,45 @@ def test_protocol_errors_bridge_errors_eof_stderr_and_non_zero_exit_surface_with
     with pytest.raises(RuntimeError, match=match):
         client.next_frame(timeout=1.0)
     client.close()
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        (
+            """
+            print(json.dumps({"type": "status", "state": "ready"}), flush=True)
+            time.sleep(0.2)
+            print(json.dumps({"type": "error", "message": "async bridge error"}), flush=True)
+            for line in sys.stdin:
+                if json.loads(line).get("type") == "stop":
+                    break
+            """,
+            "async bridge error",
+        ),
+        (
+            """
+            print(json.dumps({"type": "status", "state": "ready"}), flush=True)
+            time.sleep(0.2)
+            sys.exit(6)
+            """,
+            "bridge exited with status 6",
+        ),
+    ],
+)
+def test_next_frame_wakes_promptly_for_asynchronous_backend_errors(tmp_path, monkeypatch, body, match):
+    bridge = write_fake_bridge(tmp_path, body)
+    monkeypatch.setattr(ros2_backend, "BRIDGE_SCRIPT", bridge)
+    client = Ros2BackendClient(bridge_python=Path(sys.executable), config=write_config(tmp_path))
+
+    client.start()
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=match):
+        client.next_frame(timeout=2.0)
+    elapsed = time.monotonic() - started
+    client.close()
+
+    assert elapsed < 0.8
 
 
 
