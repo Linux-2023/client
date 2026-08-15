@@ -57,9 +57,56 @@ RealSense 相机序列号查询：
 rs-enumerate-devices | grep "Serial Number"
 ```
 
-#### 3. 数据收集
+#### 3. ROS 2 preview-first 数据收集
 
-运行数据采集脚本：
+ROS 2 采集器只连接已经运行的官方 ROS 2 节点，负责预览同步帧并将每段轨迹保存为自包含 HDF5。它不会配置 CAN、不会初始化或使能物理机械臂；CAN 激活、相机节点和 Piper 节点仍必须按官方流程在独立终端中提前启动。
+
+终端 1：启动三路 RealSense 彩色相机节点：
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agilex/camera_ros/install/setup.bash
+bash /home/agilex/camera_ros/scripts/start_realsense_3cam_color.sh
+```
+
+终端 2：启动双臂 Piper ROS 2 硬件节点：
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agilex/piper_ros/install/setup.bash
+cd /home/agilex/piper_ros
+bash start_multi_piper.sh
+```
+
+终端 3：在 client Python 3.11 环境中运行采集器（默认安全 dry-run，不发布动作）：
+```bash
+cd /home/agilex/client
+uv run python examples/piper_dual/collect_data_ros2.py \
+  --output-dir /home/agilex/piper_dual_dataset \
+  --prompt "Fold the towel" \
+  --config examples/piper_dual/ros2_piper_dual.yaml \
+  --dry-run
+```
+
+参数说明：
+- `--output-dir`: 保存 `episode_000000.hdf5`、`episode_000001.hdf5` 等文件的目录；录制过程中先写入同名 `.hdf5.partial`，成功 finalize 后原子发布为 `.hdf5`。
+- `--prompt`: 写入每个 episode metadata 的任务指令。
+- `--config`: ROS 2 bridge 配置文件，例如 `examples/piper_dual/ros2_piper_dual.yaml`。
+- `--bridge-python`: 启动 ROS 2 bridge 的 Python，默认 `/usr/bin/python3`，用于使用 ROS 2 Humble 环境。
+- `--jpeg-quality`: 写入 HDF5 metadata 的 JPEG 质量值。
+- `--max-sync-error-ms`: 同步帧允许的最大传感器时间误差。
+- `--dry-run`: 默认启用，保证采集器/bridge 不发布动作。
+- `--publish-actions`: 默认关闭；只有明确需要且不使用 `--dry-run` 时才会启用动作发布。
+- `--render-after-save`: 每次按 `e` finalize 后在 HDF5 旁边导出 `.preview.mp4` 三相机预览视频。
+
+窗口会预览 `cam_high`、`cam_left_wrist`、`cam_right_wrist` 三路相机并显示状态与 prompt。按键说明：
+- `s`: 从 PREVIEW 进入 RECORDING；采集器先执行 ROS 2 同步缓存清空 barrier，然后打开下一个唯一 `.hdf5.partial` 文件。
+- `e`: 结束当前 episode，停止追加帧，finalize/validate HDF5，可选渲染，然后回到 PREVIEW，可继续按 `s` 录制下一段。
+- `q`: 退出；如果有未 finalize 的 partial 文件会 abort，不会发布最终 HDF5。
+
+每个 finalize 后的 HDF5 都是自包含文件，包含三路 JPEG 图像、14 维 state/action、时间戳、同步误差和采集 metadata，可独立复制和验证。
+
+#### 4. 旧版直连数据收集
+
+运行旧版直连数据采集脚本：
 ```bash
 python examples/piper_dual/collect_data.py \
     --prompt "pick up the object" \
@@ -90,7 +137,7 @@ python examples/piper_dual/collect_data.py --task_type "pick" --prompt_index 0
 
 录制的数据保存在 `./recorded_data_dual` 文件夹下。
 
-#### 4. 数据集转化
+#### 5. 数据集转化
 
 将录制的 HDF5 格式转化为 LeRobot 格式：
 ```bash
@@ -98,7 +145,7 @@ export HF_LEROBOT_HOME="./datasets/piper_dual_lerobot"
 uv run examples/piper_dual/utils/convert_piper_data_to_lerobot.py     --raw_dir ./recorded_data_dual     --repo_id piper_dual_lerobot
 ```
 
-#### 5. 数据集可视化
+#### 6. 数据集可视化
 
 使用 Rerun 可视化转化后的 LeRobot 数据集：
 ```bash
