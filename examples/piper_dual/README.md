@@ -156,6 +156,24 @@ uv run examples/piper_dual/utils/vis_lerobot_datasets.py \
     --episode 0
 ```
 
+#### 7. 自包含 HDF5 渲染
+
+对 `piper_dual_ros2_v1` 自包含 HDF5，可以直接导出三个单独相机视频、固定顺序三视图视频和质量报告：
+
+```bash
+cd /home/agilex/client
+uv run python examples/piper_dual/render_dataset.py \
+    --input /path/to/episode.hdf5 \
+    --output-dir /path/to/rendered_episode \
+    --fps 30 \
+    --no-plots
+```
+
+输出会生成 `cam_high.mp4`、`cam_left_wrist.mp4`、`cam_right_wrist.mp4`、`views_3x1.mp4`、`quality.json`，并在允许绘图时额外生成 `state_action.png`。`--no-plots` 会跳过绘图，但仍会写出视频和质量报告。
+
+`visualize_hdf5.py` 检测到 `piper_dual_ros2_v1` 时会自动转调到该渲染器；旧版 HDF5 仍保持原来的关节曲线和单相机视频逻辑。
+
+
 ### 三、模型部署
 
 #### 1. 连接硬件
