@@ -61,6 +61,7 @@ class Ros2DualEnvironment(_environment.Environment):
         self._max_episode_steps = int(max_episode_steps)
         self._dry_run = bool(dry_run)
         self._publish_actions_requested = bool(publish_actions) and not self._dry_run
+        self._publish_actions_locked = False
         self._publish_actions = self._publish_actions_requested
         self._max_action_delta = None if max_action_delta is None else float(max_action_delta)
         self._done = True
@@ -78,7 +79,7 @@ class Ros2DualEnvironment(_environment.Environment):
         self._step_count = 0
         self._last_observation_timestamp = None
         self._previous_action = None
-        self._publish_actions = self._publish_actions_requested
+        self._publish_actions = self._publish_actions_requested and not self._publish_actions_locked
 
     @override
     def is_episode_complete(self) -> bool:
@@ -177,6 +178,7 @@ class Ros2DualEnvironment(_environment.Environment):
 
     def _fail_episode(self) -> None:
         self._done = True
+        self._publish_actions_locked = True
         self._publish_actions = False
 
     def _sync_error_scalar(self, sync_error: Any) -> float:

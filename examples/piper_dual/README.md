@@ -235,6 +235,7 @@ python examples/piper_dual/main_dual.py \
 - `sdk` 仍然是默认后端，旧流程不变。
 - ROS 2 默认不会发布动作；只做预览和同步帧验证。
 - 只有显式提供 `--backend ros2 --no-dry-run --publish-actions` 才允许动作发布。
+- 一旦 `Ros2DualEnvironment` 触发过致命故障，同一个实例会永久锁定动作发布；即使 `reset()` 也不会恢复，必须创建新的环境/bridge 实例才能重新发布动作。
 - 如果只是验证同步和观察映射，请保持 `--dry-run`。
 - 不要在客户端脚本里启用或复位真实机械臂；ROS 2 bridge 和机械臂节点必须先按官方流程在独立终端启动。
 

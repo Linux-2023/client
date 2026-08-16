@@ -62,10 +62,12 @@ class FakeBackend:
         *,
         repeat_last: bool = False,
         next_frame_error: Exception | None = None,
+        publish_action_failures: list[Exception] | tuple[Exception, ...] = (),
     ) -> None:
         self.frames = deque(frames)
         self.repeat_last = repeat_last
         self.next_frame_error = next_frame_error
+        self.publish_action_failures = deque(publish_action_failures)
         self.last_frame = frames[-1] if frames else None
         self.start_calls = 0
         self.clear_calls = 0
@@ -91,6 +93,8 @@ class FakeBackend:
         raise TimeoutError("Timed out waiting for a synchronized frame")
 
     def publish_action(self, action: np.ndarray) -> None:
+        if self.publish_action_failures:
+            raise self.publish_action_failures.popleft()
         self.publish_action_calls.append(np.asarray(action))
 
     def close(self) -> None:
@@ -173,6 +177,107 @@ def test_invalid_action_marks_episode_complete_and_disables_future_publish() -> 
     assert env.is_episode_complete() is True
     env.apply_action({"actions": np.arange(14, dtype=np.float32)})
     assert backend.publish_action_calls == []
+
+
+def _trigger_stale_observation_fault(env: Ros2DualEnvironment) -> None:
+    env.get_observation()
+    with pytest.raises(TimeoutError, match="stale observation"):
+        env.get_observation()
+
+
+def _trigger_bridge_failure(env: Ros2DualEnvironment) -> None:
+    with pytest.raises(RuntimeError, match="bridge exited"):
+        env.get_observation()
+
+
+def _trigger_missing_camera(env: Ros2DualEnvironment) -> None:
+    with pytest.raises(ValueError, match="cam_right_wrist"):
+        env.get_observation()
+
+
+def _trigger_invalid_action(env: Ros2DualEnvironment) -> None:
+    with pytest.raises(ValueError):
+        env.apply_action({"actions": [0.0] * 13})
+
+
+def _trigger_action_delta_violation(env: Ros2DualEnvironment) -> None:
+    env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
+    with pytest.raises(ValueError, match="max_action_delta"):
+        env.apply_action({"actions": np.ones(14, dtype=np.float32)})
+
+
+def _trigger_backend_publish_failure(env: Ros2DualEnvironment) -> None:
+    with pytest.raises(RuntimeError, match="publish failed"):
+        env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
+
+
+@pytest.mark.parametrize(
+    ("backend", "env_kwargs", "trigger_fault"),
+    [
+        pytest.param(
+            FakeBackend([_make_frame(7.0)], repeat_last=True),
+            {"prompt": "stack", "watchdog_timeout": 0.01},
+            _trigger_stale_observation_fault,
+            id="stale-observation",
+        ),
+        pytest.param(
+            FakeBackend(next_frame_error=RuntimeError("bridge exited with status 23")),
+            {"prompt": "stack", "watchdog_timeout": 0.1},
+            _trigger_bridge_failure,
+            id="bridge-failure",
+        ),
+        pytest.param(
+            FakeBackend([_make_frame(8.0, missing_cameras={"cam_right_wrist"})]),
+            {"prompt": "stack", "watchdog_timeout": 0.1},
+            _trigger_missing_camera,
+            id="missing-camera",
+        ),
+        pytest.param(FakeBackend(), {}, _trigger_invalid_action, id="invalid-action"),
+        pytest.param(
+            FakeBackend(),
+            {"max_action_delta": 0.1},
+            _trigger_action_delta_violation,
+            id="action-delta-violation",
+        ),
+        pytest.param(
+            FakeBackend(publish_action_failures=[RuntimeError("publish failed")]),
+            {},
+            _trigger_backend_publish_failure,
+            id="backend-publish-failure",
+        ),
+    ],
+)
+def test_fatal_fault_latches_action_publishing_until_new_environment(
+    backend: FakeBackend,
+    env_kwargs: dict[str, object],
+    trigger_fault: object,
+) -> None:
+    env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True, **env_kwargs)
+
+    env.reset()
+    trigger_fault(env)
+    assert env.is_episode_complete() is True
+    published_before_reset = len(backend.publish_action_calls)
+
+    env.reset()
+    env.apply_action({"actions": np.arange(14, dtype=np.float32)})
+
+    assert len(backend.publish_action_calls) == published_before_reset
+
+
+def test_max_step_completion_remains_resettable() -> None:
+    backend = FakeBackend()
+    env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True, max_episode_steps=1)
+
+    env.reset()
+    env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
+
+    assert env.is_episode_complete() is True
+
+    env.reset()
+    env.apply_action({"actions": np.ones(14, dtype=np.float32)})
+
+    assert len(backend.publish_action_calls) == 2
 
 
 def test_apply_action_does_not_publish_in_dry_run() -> None:
