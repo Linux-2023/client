@@ -16,7 +16,13 @@ import numpy as np
 from frame_synchronizer import FRAME_DIMENSION
 from frame_synchronizer import IMAGE_SENSORS
 from frame_synchronizer import REQUIRED_SENSORS
+from streaming_hdf5 import ACTION_PATH
+from streaming_hdf5 import IMAGE_GROUP_PATH
 from streaming_hdf5 import SCHEMA_VERSION
+from streaming_hdf5 import SENSOR_TIMESTAMPS_GROUP_PATH
+from streaming_hdf5 import STATE_PATH
+from streaming_hdf5 import SYNC_ERROR_GROUP_PATH
+from streaming_hdf5 import TIMESTAMP_PATH
 from streaming_hdf5 import validate_episode
 
 CAMERA_ORDER = IMAGE_SENSORS
@@ -24,6 +30,117 @@ QUALITY_FILENAME = "quality.json"
 STATE_ACTION_PLOT_FILENAME = "state_action.png"
 COMBINED_VIDEO_FILENAME = "views_3x1.mp4"
 BANNER_HEIGHT = 88
+LEGACY_SCHEMA_VERSION = "legacy_official_hdf5"
+_NEW_SCHEMA_REQUIRED_ATTRS = (
+    "schema_version",
+    "frame_count",
+    "jpeg_quality",
+    "metadata_json",
+    "camera_mapping_json",
+    "units_json",
+    "image_preprocessing_json",
+    "timing_counters_json",
+)
+_LEGACY_REQUIRED_PATHS = (
+    "/size",
+    "/timestamp",
+    "/instructions/full_instructions/text",
+    "/camera/color/left",
+    "/camera/color/front_l",
+    "/camera/color/right",
+    "/arm/jointStatePosition/masterLeft",
+    "/arm/jointStatePosition/masterRight",
+    "/arm/jointStatePosition/puppetLeft",
+    "/arm/jointStatePosition/puppetRight",
+)
+
+
+def detect_schema(path: Path) -> str:
+    """Detect the supported Piper dual HDF5 schema from root metadata and required paths."""
+
+    episode_path = Path(path)
+    try:
+        with h5py.File(episode_path, "r") as episode:
+            new_missing = _missing_new_schema_requirements(episode)
+            legacy_missing = _missing_paths(episode, _LEGACY_REQUIRED_PATHS)
+            schema_version = _decode_attr(episode.attrs.get("schema_version"))
+
+            has_new_metadata = schema_version == SCHEMA_VERSION
+            has_all_new_paths = not new_missing
+            has_all_legacy_paths = not legacy_missing
+
+            if has_new_metadata and has_all_new_paths and has_all_legacy_paths:
+                raise ValueError(
+                    f"ambiguous HDF5 schema for {episode_path}: matches both {SCHEMA_VERSION!r} and "
+                    f"{LEGACY_SCHEMA_VERSION!r} required structures"
+                )
+            if has_new_metadata and has_all_new_paths:
+                return SCHEMA_VERSION
+            if has_new_metadata:
+                raise ValueError(
+                    f"malformed {SCHEMA_VERSION} HDF5 file {episode_path}: missing required "
+                    f"metadata/paths: {', '.join(new_missing)}"
+                )
+            if schema_version not in (None, ""):
+                raise ValueError(
+                    f"unrecognized HDF5 schema for {episode_path}: unsupported schema_version "
+                    f"{schema_version!r}; expected {SCHEMA_VERSION!r} or {LEGACY_SCHEMA_VERSION!r} structure"
+                )
+            if has_all_legacy_paths:
+                return LEGACY_SCHEMA_VERSION
+
+            missing_details = []
+            if new_missing:
+                missing_details.append(f"new schema missing {', '.join(new_missing)}")
+            if legacy_missing:
+                missing_details.append(f"legacy schema missing {', '.join(legacy_missing)}")
+            raise ValueError(f"unrecognized HDF5 schema for {episode_path}: {'; '.join(missing_details)}")
+    except OSError as exc:
+        raise ValueError(f"could not open HDF5 file {episode_path}: {exc}") from exc
+
+
+def _missing_new_schema_requirements(episode: h5py.File) -> list[str]:
+    missing = [f"attr:{name}" for name in _NEW_SCHEMA_REQUIRED_ATTRS if name not in episode.attrs]
+    missing.extend(
+        _missing_paths(
+            episode,
+            (
+                STATE_PATH,
+                ACTION_PATH,
+                TIMESTAMP_PATH,
+                *(f"{IMAGE_GROUP_PATH}/{camera}" for camera in IMAGE_SENSORS),
+                *(f"{SENSOR_TIMESTAMPS_GROUP_PATH}/{sensor}" for sensor in REQUIRED_SENSORS),
+                *(f"{SYNC_ERROR_GROUP_PATH}/{sensor}" for sensor in REQUIRED_SENSORS),
+            ),
+        )
+    )
+    return missing
+
+
+def _missing_paths(episode: h5py.File, paths: tuple[str, ...]) -> list[str]:
+    missing: list[str] = []
+    for dataset_path in paths:
+        if dataset_path not in episode:
+            missing.append(dataset_path.lstrip("/"))
+            continue
+        if not isinstance(episode[dataset_path], h5py.Dataset):
+            missing.append(f"{dataset_path.lstrip('/')} (not a dataset)")
+    return missing
+
+
+def _decode_attr(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _looks_like_existing_visualizer_schema(path: Path) -> bool:
+    try:
+        with h5py.File(path, "r") as episode:
+            return "observations/qpos" in episode and "observations/images" in episode
+    except OSError:
+        return False
+
 
 
 def render_episode(path: Path, output_dir: Path, fps: int = 30, make_plots: bool = True) -> dict[str, Any]:
@@ -34,11 +151,18 @@ def render_episode(path: Path, output_dir: Path, fps: int = 30, make_plots: bool
     if fps <= 0:
         raise ValueError("fps must be positive")
 
+    try:
+        schema = detect_schema(episode_path)
+    except ValueError as exc:
+        if _looks_like_existing_visualizer_schema(episode_path):
+            raise ValueError(
+                f"legacy schema; use existing visualizer (expected {SCHEMA_VERSION!r}; schema detection failed: {exc})"
+            ) from exc
+        raise
+    if schema != SCHEMA_VERSION:
+        raise ValueError(f"legacy schema; use existing visualizer (expected {SCHEMA_VERSION!r}, found {schema!r})")
+
     report = _make_quality_report(episode_path, fps)
-    if report["schema_version"] != SCHEMA_VERSION:
-        raise ValueError(
-            f"legacy schema; use existing visualizer (expected {SCHEMA_VERSION!r}, found {report['schema_version']!r})"
-        )
     if report["frame_count"] <= 0:
         raise ValueError("episode contains zero frames")
 

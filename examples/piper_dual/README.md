@@ -76,14 +76,27 @@ cd /home/agilex/piper_ros
 bash start_multi_piper.sh
 ```
 
-终端 3：在 client Python 3.11 环境中运行采集器（默认安全 dry-run，不发布动作）：
+终端 3：在 client Python 环境中运行采集器（默认安全 dry-run，不发布动作）：
 ```bash
 cd /home/agilex/client
-uv run python examples/piper_dual/collect_data_ros2.py \
+python examples/piper_dual/collect_data_ros2.py \
   --output-dir /home/agilex/piper_dual_dataset \
   --prompt "Fold the towel" \
   --config examples/piper_dual/ros2_piper_dual.yaml \
+  --bridge-python /usr/bin/python3 \
   --dry-run
+```
+
+需要物理发布时，显式切换为：
+```bash
+cd /home/agilex/client
+python examples/piper_dual/collect_data_ros2.py \
+  --output-dir /home/agilex/piper_dual_dataset \
+  --prompt "Fold the towel" \
+  --config examples/piper_dual/ros2_piper_dual.yaml \
+  --bridge-python /usr/bin/python3 \
+  --no-dry-run \
+  --publish-actions
 ```
 
 参数说明：
@@ -102,7 +115,30 @@ uv run python examples/piper_dual/collect_data_ros2.py \
 - `e`: 结束当前 episode，停止追加帧，finalize/validate HDF5，可选渲染，然后回到 PREVIEW，可继续按 `s` 录制下一段；如果当前 episode 为空或 HDF5 验证失败，采集器会显示失败原因、删除未发布的 `.hdf5.partial`，并回到 PREVIEW，不会关闭 ROS 2 backend。
 - `q`: 退出；如果有未 finalize 的 partial 文件会 abort，不会发布最终 HDF5。
 
-每个 finalize 后的 HDF5 都是自包含文件，包含三路 JPEG 图像、14 维 state/action、时间戳、同步误差和采集 metadata，可独立复制和验证。
+每个 finalize 后的 HDF5 都是自包含文件，包含三路 JPEG 图像、14 维 state/action、时间戳、同步误差和采集 metadata，可独立复制和验证。它们的根属性固定包含 `schema_version`、`frame_count`、`jpeg_quality`、`metadata_json`、`camera_mapping_json`、`units_json`、`image_preprocessing_json` 和 `timing_counters_json`；结构检测不依赖文件名。
+
+#### 官方 legacy data_tools 流程（raw capture / sync / HDF5 / replay）
+
+来自 `/home/agilex/data_ros/src/data_tools/README.md` 的官方 legacy 命令仍然可用；本 checkout 里对应的 setup 入口是：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agilex/data_ros/install/setup.bash
+cd /home/agilex/data_ros/src/data_tools/scripts
+
+# raw capture
+ros2 launch data_tools run_data_capture.launch.py type:=aloha datasetDir:={data_path} episodeIndex:=0
+
+# sync
+python3 data_sync.py --type aloha --datasetDir {data_path}
+
+# HDF5
+python3 data_to_hdf5.py --type aloha --useCameraPointCloud "" --datasetDir {data_path} --useIndex "" --datasetTargetDir {hdf5_saving_path}
+
+# replay / publish
+ros2 launch data_tools run_data_publish.launch.py type:=aloha datasetDir:={data_path} episodeIndex:=0
+python3 data_publish.py --type aloha --datasetDir {hdf5_path}
+```
 
 #### 4. 旧版直连数据收集
 
@@ -162,16 +198,18 @@ uv run examples/piper_dual/utils/vis_lerobot_datasets.py \
 
 ```bash
 cd /home/agilex/client
-uv run python examples/piper_dual/render_dataset.py \
+python examples/piper_dual/render_dataset.py \
     --input /path/to/episode.hdf5 \
     --output-dir /path/to/rendered_episode \
     --fps 30 \
     --no-plots
 ```
 
-输出会生成 `cam_high.mp4`、`cam_left_wrist.mp4`、`cam_right_wrist.mp4`、`views_3x1.mp4`、`quality.json`，并在允许绘图时额外生成 `state_action.png`。`--no-plots` 会跳过绘图，但仍会写出视频和质量报告。
-
+输出会生成 `cam_high.mp4`、`cam_left_wrist.mp4`、`cam_right_wrist.mp4`、`views_3x1.mp4`、`quality.json`，并在允许绘图时额外生成 `state_action.png`。`quality.json` 对应 `render_episode()` 返回值中的 `schema_version`、`frame_count`、`image_decode_counts`、`errors`、`state_action_plot`、`video_paths` 和 `quality_path`。
+自包含 HDF5 的根属性固定为 `schema_version`、`frame_count`、`jpeg_quality`、`metadata_json`、`camera_mapping_json`、`units_json`、`image_preprocessing_json` 和 `timing_counters_json`；`detect_schema()` 只会返回 `piper_dual_ros2_v1` 或 `legacy_official_hdf5`，损坏/混杂文件会直接报错。
 `visualize_hdf5.py` 检测到 `piper_dual_ros2_v1` 时会自动转调到该渲染器；旧版 HDF5 仍保持原来的关节曲线和单相机视频逻辑。
+
+
 
 
 ### 三、模型部署
@@ -230,6 +268,19 @@ python examples/piper_dual/main_dual.py \
   --ros2-config examples/piper_dual/ros2_piper_dual.yaml \
   --dry-run
 ```
+
+需要显式物理发布时，先完成安全检查，再使用：
+```bash
+cd /home/agilex/client
+python examples/piper_dual/main_dual.py \
+  --backend ros2 \
+  --bridge-python /usr/bin/python3 \
+  --ros2-config examples/piper_dual/ros2_piper_dual.yaml \
+  --no-dry-run \
+  --publish-actions
+```
+
+此命令只在确认相机、CAN、急停和低风险动作策略后使用；否则保持 `--dry-run`。
 
 安全约束：
 - `sdk` 仍然是默认后端，旧流程不变。

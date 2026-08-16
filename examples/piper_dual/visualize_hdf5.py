@@ -13,8 +13,9 @@ import cv2
 import h5py
 import numpy as np
 
+from render_dataset import SCHEMA_VERSION
+from render_dataset import detect_schema
 from render_dataset import render_episode
-from streaming_hdf5 import SCHEMA_VERSION
 
 warnings.filterwarnings('ignore')
 
@@ -145,12 +146,8 @@ class HDF5Visualizer:
 
 def _is_new_schema_episode(hdf5_path: str | Path) -> bool:
     try:
-        with h5py.File(hdf5_path, 'r') as episode:
-            schema_version = episode.attrs.get('schema_version')
-            if isinstance(schema_version, bytes):
-                schema_version = schema_version.decode('utf-8', errors='replace')
-            return schema_version == SCHEMA_VERSION
-    except Exception:
+        return detect_schema(Path(hdf5_path)) == SCHEMA_VERSION
+    except ValueError:
         return False
 
 
