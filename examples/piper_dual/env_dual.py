@@ -2,19 +2,49 @@
 """
 双臂 Piper 机械臂环境，用于同时控制和采集双臂数据。
 """
-import numpy as np
-from openpi_client import image_tools
-from openpi_client.runtime import environment as _environment
-from typing_extensions import override
-import time
+from datetime import datetime
+from pathlib import Path
+import os
+import sys
 import threading
+import time
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_OPENPI_CLIENT_SRC = _PROJECT_ROOT / "packages/openpi-client/src"
+if str(_OPENPI_CLIENT_SRC) not in sys.path:
+    sys.path.insert(0, str(_OPENPI_CLIENT_SRC))
+
 import cv2
 import h5py
-from datetime import datetime
-import os
+import numpy as np
+from openpi_client.runtime import environment as _environment
+from typing_extensions import override
 
-from piper_dual_controller import PiperDualController
-from cameras import RealSenseCamera, USBCamera
+
+def create_dual_environment(backend: str = "sdk", **kwargs):
+    """Create the requested backend without importing unused hardware modules."""
+    if backend == "ros2":
+        from ros2_environment import Ros2DualEnvironment
+
+        return Ros2DualEnvironment(**kwargs)
+    if backend != "sdk":
+        raise ValueError(f"Unsupported backend: {backend}")
+
+    sdk_kwargs = dict(kwargs)
+    for key in (
+        "bridge_python",
+        "ros2_config",
+        "dry_run",
+        "publish_actions",
+        "observation_adapter",
+        "action_adapter",
+        "backend_client",
+        "backend",
+        "frame_timeout",
+        "max_action_delta",
+    ):
+        sdk_kwargs.pop(key, None)
+    return PiperDualEnvironment(**sdk_kwargs)
 
 
 class PiperDualEnvironment(_environment.Environment):
@@ -77,11 +107,14 @@ class PiperDualEnvironment(_environment.Environment):
         self._device_healthy = True
         self._robot_enabled = False
 
-        # Initialize dual arm hardware
+        # Initialize dual arm hardware. Keep hardware imports lazy so the ROS 2 path never imports SDK modules.
+        from piper_dual_controller import PiperDualController
+        from cameras import RealSenseCamera, USBCamera
+
         self._robot = PiperDualController(
-            left_can_port=left_can_port, 
-            right_can_port=right_can_port, 
-            gripper_norm=gripper_norm
+            left_can_port=left_can_port,
+            right_can_port=right_can_port,
+            gripper_norm=gripper_norm,
         )
         
         # Initialize cameras: high (global view), left wrist, right wrist (optimized)
