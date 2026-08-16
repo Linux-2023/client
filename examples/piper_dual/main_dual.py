@@ -72,10 +72,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=Args.max_action_horizon,
         help="Maximum chunk horizon kept for compatibility with the remote broker",
     )
-    parser.add_argument("--action-horizon", type=int, default=Args.action_horizon, help="Remote action horizon")
+    parser.add_argument(
+        "--action-horizon",
+        "--action_horizon",
+        dest="action_horizon",
+        type=int,
+        default=Args.action_horizon,
+        help="Remote action horizon",
+    )
     parser.add_argument("--fps", type=int, default=Args.fps, help="Runtime frame rate")
     parser.add_argument(
         "--actions-during-latency",
+        "--actions_during_latency",
+        dest="actions_during_latency",
         type=int,
         default=Args.actions_during_latency,
         help="Extra actions queued during policy latency",
@@ -123,21 +132,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=Args.display,
         help="Show the USB camera preview window",
     )
-    parser.add_argument("--high-camera-id", type=str, default=Args.high_camera_id, help="RealSense serial number")
+    parser.add_argument(
+        "--high-camera-id",
+        "--high_camera_id",
+        dest="high_camera_id",
+        type=str,
+        default=Args.high_camera_id,
+        help="RealSense serial number",
+    )
     parser.add_argument(
         "--left-wrist-camera-id",
+        "--left_wrist_camera_id",
+        dest="left_wrist_camera_id",
         type=int,
         default=Args.left_wrist_camera_id,
         help="Left wrist camera device ID",
     )
     parser.add_argument(
         "--right-wrist-camera-id",
+        "--right_wrist_camera_id",
+        dest="right_wrist_camera_id",
         type=int,
         default=Args.right_wrist_camera_id,
         help="Right wrist camera device ID",
     )
-    parser.add_argument("--left-can-port", type=str, default=Args.left_can_port, help="Left arm CAN port")
-    parser.add_argument("--right-can-port", type=str, default=Args.right_can_port, help="Right arm CAN port")
+    parser.add_argument(
+        "--left-can-port",
+        "--left_can_port",
+        dest="left_can_port",
+        type=str,
+        default=Args.left_can_port,
+        help="Left arm CAN port",
+    )
+    parser.add_argument(
+        "--right-can-port",
+        "--right_can_port",
+        dest="right_can_port",
+        type=str,
+        default=Args.right_can_port,
+        help="Right arm CAN port",
+    )
     parser.add_argument("--prompt", type=str, default=Args.prompt, help="Task prompt")
     parser.add_argument(
         "--use-async",
@@ -147,6 +181,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--use-rtc",
+        "--use_rtc",
+        dest="use_rtc",
         action=argparse.BooleanOptionalAction,
         default=Args.use_rtc,
         help="Enable RTC mode in the remote broker",
@@ -159,12 +195,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--tele-mode",
+        "--tele_mode",
+        dest="tele_mode",
         action=argparse.BooleanOptionalAction,
         default=Args.tele_mode,
         help="Disable robot motion commands for safe testing",
     )
     parser.add_argument(
         "--record-mode",
+        "--record_mode",
+        dest="record_mode",
         action=argparse.BooleanOptionalAction,
         default=Args.record_mode,
         help="Record trajectory data during episodes",

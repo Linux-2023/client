@@ -81,3 +81,26 @@ python -m py_compile examples/piper_dual/main_dual.py examples/piper_dual/env_du
 (no output)
 ```
 - No hardware or physical publishing commands were run.
+
+## Task 7 CLI compatibility
+- Decision: keep dashed spellings canonical and add explicit underscore aliases only for the prior PI05 options already documented or confirmed by focused search: `left_can_port`, `right_can_port`, `high_camera_id`, `left_wrist_camera_id`, `right_wrist_camera_id`, plus `action_horizon`, `actions_during_latency`, `use_rtc`, `tele_mode`, and `record_mode`.
+- No README change was needed because the documented underscore command now parses unchanged.
+- RED:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_main_dual.py::test_parse_args_accepts_documented_underscore_pi05_options -q
+FAILED examples/piper_dual/tests/test_main_dual.py::test_parse_args_accepts_documented_underscore_pi05_options - SystemExit: 2
+__main__.py: error: unrecognized arguments: --left_can_port can_left_doc --right_can_port can_right_doc --high_camera_id 148522073709 --left_wrist_camera_id 6 --right_wrist_camera_id 8
+pytest: 1 failed in 0.21s
+```
+- GREEN:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_main_dual.py::test_parse_args_accepts_documented_underscore_pi05_options examples/piper_dual/tests/test_main_dual.py::test_parse_args_preserves_dashed_pi05_options -q
+2 passed in 0.10s
+```
+- Full Task 7 focused suites:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py examples/piper_dual/tests/test_main_dual.py -q
+40 passed in 0.20s
+```
+- Help check: `python examples/piper_dual/main_dual.py --help` remained readable and showed both dashed canonical flags and the preserved underscore aliases.
+- Compile check: `python -m py_compile examples/piper_dual/main_dual.py examples/piper_dual/env_dual.py examples/piper_dual/ros2_environment.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_ros2_environment.py` produced no output.

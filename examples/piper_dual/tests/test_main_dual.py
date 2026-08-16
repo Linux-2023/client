@@ -58,6 +58,56 @@ def test_parse_args_maps_ros2_safety_flags_into_args() -> None:
     assert args.publish_actions is True
 
 
+def test_parse_args_accepts_documented_underscore_pi05_options() -> None:
+    args = main_dual.parse_args([
+        '--mode',
+        'remote',
+        '--host',
+        '0.0.0.0',
+        '--port',
+        '8000',
+        '--prompt',
+        'pick up the object',
+        '--left_can_port',
+        'can_left_doc',
+        '--right_can_port',
+        'can_right_doc',
+        '--high_camera_id',
+        '148522073709',
+        '--left_wrist_camera_id',
+        '6',
+        '--right_wrist_camera_id',
+        '8',
+    ])
+
+    assert args.left_can_port == 'can_left_doc'
+    assert args.right_can_port == 'can_right_doc'
+    assert args.high_camera_id == '148522073709'
+    assert args.left_wrist_camera_id == 6
+    assert args.right_wrist_camera_id == 8
+
+
+def test_parse_args_preserves_dashed_pi05_options() -> None:
+    args = main_dual.parse_args([
+        '--left-can-port',
+        'can_left_dash',
+        '--right-can-port',
+        'can_right_dash',
+        '--high-camera-id',
+        'high_dash',
+        '--left-wrist-camera-id',
+        '7',
+        '--right-wrist-camera-id',
+        '9',
+    ])
+
+    assert args.left_can_port == 'can_left_dash'
+    assert args.right_can_port == 'can_right_dash'
+    assert args.high_camera_id == 'high_dash'
+    assert args.left_wrist_camera_id == 7
+    assert args.right_wrist_camera_id == 9
+
+
 def test_build_environment_omits_ros2_flags_for_sdk_backend(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
