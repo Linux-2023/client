@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 import sys
 
@@ -82,6 +83,81 @@ def _write_legacy_episode(path: Path, *, frame_count: int = 5) -> Path:
             images.create_dataset(camera, data=image_stack, maxshape=(None, 32, 48, 3), chunks=(1, 32, 48, 3))
         episode.create_dataset("task", data=np.asarray([b"legacy schema"] * frame_count, dtype="S13"))
     return path
+
+
+def _write_official_legacy_episode(path: Path, *, frame_count: int = 3) -> Path:
+    with h5py.File(path, "w") as episode:
+        camera = episode.create_group("camera")
+        color = camera.create_group("color")
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        for camera_name in ("left", "front_l", "right"):
+            values = np.asarray(
+                [f"camera/color/{camera_name}/{1000.0 + index:.6f}.jpg" for index in range(frame_count)],
+                dtype=object,
+            )
+            color.create_dataset(camera_name, data=values, dtype=string_dtype)
+
+        arm = episode.create_group("arm")
+        position = arm.create_group("jointStatePosition")
+        for arm_name in ("masterLeft", "masterRight", "puppetLeft", "puppetRight"):
+            data = np.stack([np.arange(7, dtype=np.float64) + index for index in range(frame_count)])
+            position.create_dataset(arm_name, data=data)
+
+        full = episode.create_group("instructions").create_group("full_instructions")
+        full.create_dataset("text", data=np.asarray([b"legacy"], dtype="S6"))
+        episode.create_dataset("timestamp", data=np.arange(frame_count, dtype=np.float64))
+        episode.create_dataset("size", data=np.asarray(frame_count, dtype=np.int64))
+    return path
+
+
+def _write_malformed_new_episode_missing_camera(path: Path) -> Path:
+    episode_path = _write_new_schema_episode(path, frame_count=1)
+    with h5py.File(episode_path, "a") as episode:
+        del episode["/observations/images/cam_right_wrist"]
+    return episode_path
+
+
+def _write_ambiguous_schema_episode(path: Path) -> Path:
+    episode_path = _write_official_legacy_episode(path, frame_count=1)
+    with h5py.File(episode_path, "a") as episode:
+        episode.attrs["schema_version"] = SCHEMA_VERSION
+        episode.attrs["metadata_json"] = "{}"
+        episode.attrs["camera_mapping_json"] = "{}"
+        episode.attrs["units_json"] = "{}"
+        episode.attrs["image_preprocessing_json"] = "{}"
+        episode.attrs["timing_counters_json"] = "{}"
+        episode.attrs["frame_count"] = 1
+        episode.attrs["jpeg_quality"] = 90
+        observations = episode.create_group("observations")
+        observations.create_dataset("state", data=np.zeros((1, FRAME_DIMENSION), dtype=np.float32), maxshape=(None, FRAME_DIMENSION))
+        observations.create_dataset("timestamp", data=np.zeros((1,), dtype=np.float32), maxshape=(None,))
+        episode.create_dataset("action", data=np.zeros((1, FRAME_DIMENSION), dtype=np.float32), maxshape=(None, FRAME_DIMENSION))
+        vlen_uint8 = h5py.vlen_dtype(np.dtype("uint8"))
+        images = observations.create_group("images")
+        sensor_timestamps = observations.create_group("sensor_timestamps")
+        sync_error = observations.create_group("sync_error")
+        for camera in IMAGE_SENSORS:
+            images.create_dataset(camera, shape=(1,), dtype=vlen_uint8, maxshape=(None,))
+        for sensor in REQUIRED_SENSORS:
+            sensor_timestamps.create_dataset(sensor, data=np.zeros((1,), dtype=np.float32), maxshape=(None,))
+            sync_error.create_dataset(sensor, data=np.zeros((1,), dtype=np.float32), maxshape=(None,))
+    return episode_path
+
+
+def _write_unrecognized_hdf5(path: Path) -> Path:
+    with h5py.File(path, "w") as episode:
+        episode.create_dataset("not_a_schema", data=np.arange(3))
+    return path
+
+
+def _write_invalid_visualizer_dispatch_case(tmp_path: Path, case: str) -> Path:
+    if case == "malformed_new_missing_camera":
+        return _write_malformed_new_episode_missing_camera(tmp_path / "malformed_new_missing_camera.hdf5")
+    if case == "ambiguous_mixed":
+        return _write_ambiguous_schema_episode(tmp_path / "ambiguous_mixed.hdf5")
+    if case == "unrecognized":
+        return _write_unrecognized_hdf5(tmp_path / "unrecognized.hdf5")
+    raise AssertionError(case)
 
 
 def _read_video(path: Path) -> list[np.ndarray]:
@@ -176,9 +252,67 @@ def test_render_episode_refuses_legacy_schema_with_clear_message(tmp_path: Path)
         render_episode(legacy_path, tmp_path / "output")
 
 
+
+def test_visualize_hdf5_schema_gate_distinguishes_valid_new_from_official_legacy(tmp_path: Path) -> None:
+    new_path = _write_new_schema_episode(tmp_path / "new.hdf5")
+    legacy_path = _write_official_legacy_episode(tmp_path / "legacy_official.hdf5")
+
+    assert visualize_hdf5._is_new_schema_episode(new_path) is True
+    assert visualize_hdf5._is_new_schema_episode(legacy_path) is False
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("malformed_new_missing_camera", "malformed piper_dual_ros2_v1.*observations/images/cam_right_wrist"),
+        ("ambiguous_mixed", "ambiguous HDF5 schema.*piper_dual_ros2_v1.*legacy_official_hdf5"),
+        ("unrecognized", "unrecognized HDF5 schema.*missing"),
+    ],
+)
+def test_visualize_hdf5_main_rejects_invalid_schema_without_constructing_legacy_visualizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, match: str
+) -> None:
+    episode_path = _write_invalid_visualizer_dispatch_case(tmp_path, case)
+    calls: list[tuple[str, object]] = []
+
+    def fake_render_episode(path: Path, output_dir: Path, fps: int = 30, make_plots: bool = True) -> dict:
+        calls.append(("render", (Path(path), Path(output_dir), fps, make_plots)))
+        raise AssertionError("render_episode should not be called for invalid schemas")
+
+    class FakeVisualizer:
+        def __init__(self, hdf5_path: Path) -> None:
+            calls.append(("legacy_init", Path(hdf5_path)))
+            raise AssertionError("HDF5Visualizer should not be constructed for invalid schemas")
+
+    monkeypatch.setattr(visualize_hdf5, "render_episode", fake_render_episode, raising=False)
+    monkeypatch.setattr(visualize_hdf5, "HDF5Visualizer", FakeVisualizer)
+    monkeypatch.setattr(sys, "argv", ["visualize_hdf5.py", "--hdf5_path", str(episode_path), "--make_video"])
+
+    with pytest.raises(ValueError, match=match):
+        visualize_hdf5.main()
+    assert calls == []
+
+
+def test_visualize_hdf5_cli_reports_invalid_schema_and_exits_nonzero(tmp_path: Path) -> None:
+    episode_path = _write_malformed_new_episode_missing_camera(tmp_path / "malformed_cli.hdf5")
+    script_path = Path(visualize_hdf5.__file__).resolve()
+
+    completed = subprocess.run(
+        [sys.executable, str(script_path), "--hdf5_path", str(episode_path), "--make_video"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "malformed piper_dual_ros2_v1" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert "✅ 可视化完成" not in completed.stdout
+
+
 def test_visualize_hdf5_dispatches_new_schema_to_renderer_and_preserves_legacy_behavior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     new_path = _write_new_schema_episode(tmp_path / "new.hdf5")
-    legacy_path = _write_legacy_episode(tmp_path / "legacy.hdf5")
+    legacy_path = _write_official_legacy_episode(tmp_path / "legacy_official.hdf5")
 
     calls: list[tuple[str, object]] = []
 

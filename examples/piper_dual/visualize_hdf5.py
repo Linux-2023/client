@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+
 from pathlib import Path
 import warnings
 
@@ -13,9 +15,11 @@ import cv2
 import h5py
 import numpy as np
 
+from render_dataset import LEGACY_SCHEMA_VERSION
 from render_dataset import SCHEMA_VERSION
 from render_dataset import detect_schema
 from render_dataset import render_episode
+
 
 warnings.filterwarnings('ignore')
 
@@ -145,10 +149,8 @@ class HDF5Visualizer:
 
 
 def _is_new_schema_episode(hdf5_path: str | Path) -> bool:
-    try:
-        return detect_schema(Path(hdf5_path)) == SCHEMA_VERSION
-    except ValueError:
-        return False
+    return detect_schema(Path(hdf5_path)) == SCHEMA_VERSION
+
 
 
 def _default_render_output_dir(hdf5_path: str | Path) -> Path:
@@ -184,11 +186,15 @@ def main():
 
     args = parser.parse_args()
 
-    if _is_new_schema_episode(args.hdf5_path):
+    schema = detect_schema(Path(args.hdf5_path))
+    if schema == SCHEMA_VERSION:
         output_dir = Path(args.output_dir) if args.output_dir else _default_render_output_dir(args.hdf5_path)
         report = render_episode(Path(args.hdf5_path), output_dir, fps=args.fps, make_plots=not args.no_plots)
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return
+
+    if schema != LEGACY_SCHEMA_VERSION:
+        raise ValueError(f'unsupported HDF5 schema for {args.hdf5_path}: {schema!r}')
 
     visualizer = HDF5Visualizer(args.hdf5_path)
     visualizer.fps = args.fps
@@ -216,4 +222,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
