@@ -137,6 +137,13 @@ class Ros2DualEnvironment(_environment.Environment):
 
     @override
     def apply_action(self, action: dict[str, Any]) -> None:
+        self._ensure_open()
+        if self._publish_actions_locked:
+            raise RuntimeError(
+                "ROS 2 environment is locked after a fatal fault; create a new environment before applying actions."
+            )
+        if self._done:
+            raise RuntimeError("ROS 2 episode is complete; call reset() before applying actions.")
         if not isinstance(action, dict):
             self._fail_episode()
             raise ValueError("Action must be a JSON object")

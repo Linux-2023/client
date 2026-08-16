@@ -192,3 +192,45 @@ python -m py_compile examples/piper_dual/main_dual.py examples/piper_dual/env_du
 (no output)
 ```
 - No hardware or physical action publishing was executed.
+
+## Task 7 post-fatal action rejection regression
+- Root cause: `_fail_episode()` set `_publish_actions_locked` and `_done`, but `apply_action()` did not check either flag before validating the next action, updating `_previous_action`, incrementing `_step_count`, and only suppressing publication.
+- Decision: `apply_action()` now calls `_ensure_open()` first, then rejects a latched fatal fault with a descriptive `RuntimeError` telling the caller to create a new environment before any validation, publication, or action-state mutation. Non-fatal completed episodes are also rejected until `reset()` so ordinary max-step completion remains resettable without silently processing actions while `_done` is true.
+- Post-fault invariant: after any fatal fault, subsequent `apply_action()` calls on the same `Ros2DualEnvironment` instance raise before action validation/publication/storage and leave `_previous_action`, `_step_count`, and backend `publish_action_calls` unchanged, including after `reset()`; physical action recovery requires a new environment/backend instance.
+- RED:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py::test_fatal_fault_rejects_future_actions_and_survives_reset examples/piper_dual/tests/test_ros2_environment.py::test_invalid_action_marks_episode_complete_and_rejects_future_actions examples/piper_dual/tests/test_ros2_environment.py::test_max_step_completion_remains_resettable -q
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_fatal_fault_rejects_future_actions_and_survives_reset[stale-observation] - Failed: DID NOT RAISE RuntimeError
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_fatal_fault_rejects_future_actions_and_survives_reset[bridge-failure] - Failed: DID NOT RAISE RuntimeError
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_fatal_fault_rejects_future_actions_and_survives_reset[missing-camera] - Failed: DID NOT RAISE RuntimeError
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_fatal_fault_rejects_future_actions_and_survives_reset[invalid-action] - Failed: DID NOT RAISE RuntimeError
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_fatal_fault_rejects_future_actions_and_survives_reset[action-delta-violation] - Failed: DID NOT RAISE RuntimeError
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_fatal_fault_rejects_future_actions_and_survives_reset[backend-publish-failure] - Failed: DID NOT RAISE RuntimeError
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_invalid_action_marks_episode_complete_and_rejects_future_actions - Failed: DID NOT RAISE RuntimeError
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_max_step_completion_remains_resettable - Failed: DID NOT RAISE RuntimeError
+pytest: 8 failed in 0.20s
+```
+- GREEN targeted regressions:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py::test_fatal_fault_rejects_future_actions_and_survives_reset examples/piper_dual/tests/test_ros2_environment.py::test_invalid_action_marks_episode_complete_and_rejects_future_actions examples/piper_dual/tests/test_ros2_environment.py::test_max_step_completion_remains_resettable -q
+........                                                                 [100%]
+8 passed in 0.11s
+```
+- GREEN Task 7 environment/main suites:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py examples/piper_dual/tests/test_main_dual.py -q
+..........................................                               [100%]
+42 passed in 0.21s
+```
+- GREEN bridge protocol/codec/backend suites including YAML config:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py -q
+..............................................                           [100%]
+46 passed in 3.99s
+```
+- GREEN compile check:
+```text
+python -m py_compile examples/piper_dual/main_dual.py examples/piper_dual/env_dual.py examples/piper_dual/ros2_environment.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_ros2_environment.py && /usr/bin/python3 -m py_compile examples/piper_dual/ros2_bridge_process.py examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py
+(no output)
+```
+- No hardware or physical action publishing was executed.

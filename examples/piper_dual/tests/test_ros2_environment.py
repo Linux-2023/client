@@ -181,7 +181,8 @@ def test_reset_stage_bridge_failure_latches_action_publishing_until_new_environm
     assert env.is_episode_complete() is True
 
     env.reset()
-    env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
+    with pytest.raises(RuntimeError, match="create a new environment"):
+        env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
 
     assert backend.publish_action_calls == []
 
@@ -218,7 +219,7 @@ def test_apply_action_rejects_invalid_14d_actions(action: list[float]) -> None:
     assert backend.publish_action_calls == []
 
 
-def test_invalid_action_marks_episode_complete_and_disables_future_publish() -> None:
+def test_invalid_action_marks_episode_complete_and_rejects_future_actions() -> None:
     backend = FakeBackend()
     env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True)
 
@@ -228,8 +229,12 @@ def test_invalid_action_marks_episode_complete_and_disables_future_publish() -> 
         env.apply_action({"actions": [0.0] * 13})
 
     assert env.is_episode_complete() is True
-    env.apply_action({"actions": np.arange(14, dtype=np.float32)})
+
+    with pytest.raises(RuntimeError, match="create a new environment"):
+        env.apply_action({"actions": np.arange(14, dtype=np.float32)})
+
     assert backend.publish_action_calls == []
+
 
 def test_get_observation_maps_ros2_frame_to_model_contract() -> None:
     backend = FakeBackend([_make_frame(2.0)])
@@ -316,7 +321,7 @@ def _trigger_backend_publish_failure(env: Ros2DualEnvironment) -> None:
         ),
     ],
 )
-def test_fatal_fault_latches_action_publishing_until_new_environment(
+def test_fatal_fault_rejects_future_actions_and_survives_reset(
     backend: FakeBackend,
     env_kwargs: dict[str, object],
     trigger_fault: object,
@@ -326,13 +331,37 @@ def test_fatal_fault_latches_action_publishing_until_new_environment(
     env.reset()
     trigger_fault(env)
     assert env.is_episode_complete() is True
-    published_before_reset = len(backend.publish_action_calls)
+
+    sample_action = {"actions": np.zeros(14, dtype=np.float32)}
+    previous_action_snapshot = None if env._previous_action is None else env._previous_action.copy()
+    step_count_snapshot = env._step_count
+    publish_action_snapshot = [published.copy() for published in backend.publish_action_calls]
+
+    with pytest.raises(RuntimeError, match="create a new environment"):
+        env.apply_action(sample_action)
+
+    if previous_action_snapshot is None:
+        assert env._previous_action is None
+    else:
+        np.testing.assert_array_equal(env._previous_action, previous_action_snapshot)
+    assert env._step_count == step_count_snapshot
+    assert len(backend.publish_action_calls) == len(publish_action_snapshot)
+    for actual, expected in zip(backend.publish_action_calls, publish_action_snapshot):
+        np.testing.assert_array_equal(actual, expected)
 
     env.reset()
-    env.apply_action({"actions": np.arange(14, dtype=np.float32)})
+    assert env._previous_action is None
+    assert env._step_count == 0
+    reset_publish_snapshot = [published.copy() for published in backend.publish_action_calls]
 
-    assert len(backend.publish_action_calls) == published_before_reset
+    with pytest.raises(RuntimeError, match="create a new environment"):
+        env.apply_action(sample_action)
 
+    assert env._previous_action is None
+    assert env._step_count == 0
+    assert len(backend.publish_action_calls) == len(reset_publish_snapshot)
+    for actual, expected in zip(backend.publish_action_calls, reset_publish_snapshot):
+        np.testing.assert_array_equal(actual, expected)
 
 def test_max_step_completion_remains_resettable() -> None:
     backend = FakeBackend()
@@ -342,6 +371,9 @@ def test_max_step_completion_remains_resettable() -> None:
     env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
 
     assert env.is_episode_complete() is True
+
+    with pytest.raises(RuntimeError, match="call reset"):
+        env.apply_action({"actions": np.ones(14, dtype=np.float32)})
 
     env.reset()
     env.apply_action({"actions": np.ones(14, dtype=np.float32)})
