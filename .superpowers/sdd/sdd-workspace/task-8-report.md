@@ -182,3 +182,65 @@ python -m py_compile examples/piper_dual/visualize_hdf5.py examples/piper_dual/t
 - `_is_new_schema_episode()` compares the detector result to `piper_dual_ros2_v1` and no longer converts `ValueError` into a legacy fallback.
 - `visualize_hdf5.py` dispatches `piper_dual_ros2_v1` to `render_episode()` and only explicit `legacy_official_hdf5` to `HDF5Visualizer`.
 - Malformed declared-new, ambiguous mixed, unrecognized, and unreadable HDF5 errors propagate to CLI failure; they must not instantiate `HDF5Visualizer` or print the success banner.
+
+## Mixed legacy/new schema detector fix
+
+### RED evidence
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_legacy_compatibility.py::test_detect_schema_rejects_legacy_episode_with_new_schema_path_without_schema_version -q
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ test_detect_schema_rejects_legacy_episode_with_new_schema_path_without_schema_version _
+
+tmp_path = PosixPath('/tmp/pytest-of-agilex/pytest-66/test_detect_schema_rejects_leg0')
+
+    def test_detect_schema_rejects_legacy_episode_with_new_schema_path_without_schema_version(tmp_path: Path) -> None:
+        mixed = _write_structural_legacy_episode(tmp_path / "mixed_legacy_new.hdf5")
+        with h5py.File(mixed, "a") as episode:
+            observations = episode.create_group("observations")
+            observations.create_dataset("state", data=np.zeros((1, 14), dtype=np.float32), maxshape=(None, 14))
+
+>       with pytest.raises(ValueError, match="ambiguous HDF5 schema.*mixed legacy/new.*legacy_official_hdf5.*observations/state"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+examples/piper_dual/tests/test_legacy_compatibility.py:122: Failed
+=========================== short test summary info ============================
+FAILED examples/piper_dual/tests/test_legacy_compatibility.py::test_detect_schema_rejects_legacy_episode_with_new_schema_path_without_schema_version - Failed: DID NOT RAISE ValueError
+1 failed in 0.12s
+```
+
+### GREEN evidence
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_legacy_compatibility.py::test_detect_schema_rejects_legacy_episode_with_new_schema_path_without_schema_version -q
+.                                                                        [100%]
+1 passed in 0.11s
+```
+
+### Verification
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_legacy_compatibility.py examples/piper_dual/tests/test_render_dataset.py examples/piper_dual/tests/test_ros2_end_to_end_mock.py -q
+........................                                                 [100%]
+24 passed in 0.71s
+```
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_action_adapter.py examples/piper_dual/tests/test_collector_state_machine.py examples/piper_dual/tests/test_dataset_schema.py examples/piper_dual/tests/test_frame_synchronizer.py examples/piper_dual/tests/test_legacy_compatibility.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_observation_adapter.py examples/piper_dual/tests/test_render_dataset.py examples/piper_dual/tests/test_ros2_end_to_end_mock.py examples/piper_dual/tests/test_ros2_environment.py examples/piper_dual/tests/test_streaming_hdf5.py -q
+........................................................................ [ 57%]
+......................................................                   [100%]
+126 passed in 0.99s
+```
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py -q
+..............................................                           [100%]
+46 passed in 3.98s
+```
+
+```text
+python -m py_compile examples/piper_dual/render_dataset.py examples/piper_dual/tests/test_legacy_compatibility.py && /usr/bin/python3 -m py_compile examples/piper_dual/render_dataset.py examples/piper_dual/tests/test_legacy_compatibility.py
+(no output)
+```
+
+### Invariant
+`detect_schema()` returns `legacy_official_hdf5` only when the legacy structure is unambiguous; if any new-schema required attr/path is present alongside all legacy required paths and `schema_version` is absent, it raises an ambiguous/mixed error instead of falling through to legacy. Complete new metadata/paths still returns `piper_dual_ros2_v1`, and malformed declared-new or unsupported schema versions keep their existing errors.

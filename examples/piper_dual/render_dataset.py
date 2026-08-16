@@ -41,6 +41,15 @@ _NEW_SCHEMA_REQUIRED_ATTRS = (
     "image_preprocessing_json",
     "timing_counters_json",
 )
+_NEW_SCHEMA_REQUIRED_PATHS = (
+    STATE_PATH,
+    ACTION_PATH,
+    TIMESTAMP_PATH,
+    *(f"{IMAGE_GROUP_PATH}/{camera}" for camera in IMAGE_SENSORS),
+    *(f"{SENSOR_TIMESTAMPS_GROUP_PATH}/{sensor}" for sensor in REQUIRED_SENSORS),
+    *(f"{SYNC_ERROR_GROUP_PATH}/{sensor}" for sensor in REQUIRED_SENSORS),
+)
+
 _LEGACY_REQUIRED_PATHS = (
     "/size",
     "/timestamp",
@@ -64,6 +73,7 @@ def detect_schema(path: Path) -> str:
             new_missing = _missing_new_schema_requirements(episode)
             legacy_missing = _missing_paths(episode, _LEGACY_REQUIRED_PATHS)
             schema_version = _decode_attr(episode.attrs.get("schema_version"))
+            new_markers = _new_schema_markers(episode)
 
             has_new_metadata = schema_version == SCHEMA_VERSION
             has_all_new_paths = not new_missing
@@ -71,8 +81,8 @@ def detect_schema(path: Path) -> str:
 
             if has_new_metadata and has_all_new_paths and has_all_legacy_paths:
                 raise ValueError(
-                    f"ambiguous HDF5 schema for {episode_path}: matches both {SCHEMA_VERSION!r} and "
-                    f"{LEGACY_SCHEMA_VERSION!r} required structures"
+                    f"ambiguous HDF5 schema for {episode_path}: mixed legacy/new structure; "
+                    f"matches both {SCHEMA_VERSION!r} and {LEGACY_SCHEMA_VERSION!r} required structures"
                 )
             if has_new_metadata and has_all_new_paths:
                 return SCHEMA_VERSION
@@ -87,7 +97,14 @@ def detect_schema(path: Path) -> str:
                     f"{schema_version!r}; expected {SCHEMA_VERSION!r} or {LEGACY_SCHEMA_VERSION!r} structure"
                 )
             if has_all_legacy_paths:
+                if new_markers:
+                    raise ValueError(
+                        f"ambiguous HDF5 schema for {episode_path}: mixed legacy/new structure; "
+                        f"legacy {LEGACY_SCHEMA_VERSION!r} paths present alongside new-schema markers: "
+                        f"{', '.join(new_markers)}"
+                    )
                 return LEGACY_SCHEMA_VERSION
+
 
             missing_details = []
             if new_missing:
@@ -101,20 +118,14 @@ def detect_schema(path: Path) -> str:
 
 def _missing_new_schema_requirements(episode: h5py.File) -> list[str]:
     missing = [f"attr:{name}" for name in _NEW_SCHEMA_REQUIRED_ATTRS if name not in episode.attrs]
-    missing.extend(
-        _missing_paths(
-            episode,
-            (
-                STATE_PATH,
-                ACTION_PATH,
-                TIMESTAMP_PATH,
-                *(f"{IMAGE_GROUP_PATH}/{camera}" for camera in IMAGE_SENSORS),
-                *(f"{SENSOR_TIMESTAMPS_GROUP_PATH}/{sensor}" for sensor in REQUIRED_SENSORS),
-                *(f"{SYNC_ERROR_GROUP_PATH}/{sensor}" for sensor in REQUIRED_SENSORS),
-            ),
-        )
-    )
+    missing.extend(_missing_paths(episode, _NEW_SCHEMA_REQUIRED_PATHS))
     return missing
+
+
+def _new_schema_markers(episode: h5py.File) -> list[str]:
+    markers = [f"attr:{name}" for name in _NEW_SCHEMA_REQUIRED_ATTRS if name in episode.attrs]
+    markers.extend(path.lstrip("/") for path in _NEW_SCHEMA_REQUIRED_PATHS if path in episode)
+    return markers
 
 
 def _missing_paths(episode: h5py.File, paths: tuple[str, ...]) -> list[str]:

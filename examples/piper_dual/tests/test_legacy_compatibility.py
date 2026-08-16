@@ -113,6 +113,15 @@ def test_detect_schema_identifies_legacy_episode_from_structure_not_filename(tmp
 
     assert detect_schema(legacy_path) == LEGACY_SCHEMA
 
+def test_detect_schema_rejects_legacy_episode_with_new_schema_path_without_schema_version(tmp_path: Path) -> None:
+    mixed = _write_structural_legacy_episode(tmp_path / "mixed_legacy_new.hdf5")
+    with h5py.File(mixed, "a") as episode:
+        observations = episode.create_group("observations")
+        observations.create_dataset("state", data=np.zeros((1, 14), dtype=np.float32), maxshape=(None, 14))
+
+    with pytest.raises(ValueError, match="ambiguous HDF5 schema.*mixed legacy/new.*legacy_official_hdf5.*observations/state"):
+        detect_schema(mixed)
+
 
 def test_detect_schema_rejects_new_schema_metadata_without_required_datasets_descriptively(tmp_path: Path) -> None:
     malformed = tmp_path / "looks_new.hdf5"
