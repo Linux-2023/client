@@ -109,6 +109,12 @@ class FakeBackend:
         self.close_calls += 1
 
 
+
+class MutatingPublishBackend(FakeBackend):
+    def publish_action(self, action: np.ndarray) -> None:
+        super().publish_action(action)
+        self.publish_action_calls[-1][...] = np.float32(0.5)
+
 @pytest.fixture
 def backend() -> FakeBackend:
     return FakeBackend([_make_frame(1.0)])
@@ -390,6 +396,26 @@ def test_apply_action_snapshots_float32_caller_arrays_before_publish_and_delta_c
         env.apply_action({"actions": np.full(14, 0.6, dtype=np.float32)})
 
     np.testing.assert_array_equal(backend.publish_action_calls[0], np.zeros(14, dtype=np.float32))
+    assert env.is_episode_complete() is True
+    assert len(backend.publish_action_calls) == 1
+
+
+def test_backend_publish_mutation_cannot_corrupt_previous_action_delta_baseline() -> None:
+    backend = MutatingPublishBackend()
+    env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True, max_action_delta=0.4)
+    first_action = np.zeros(14, dtype=np.float32)
+
+    env.reset()
+    env.apply_action({"actions": first_action})
+
+    assert backend.publish_action_calls[0] is not first_action
+    np.testing.assert_array_equal(backend.publish_action_calls[0], np.full(14, 0.5, dtype=np.float32))
+
+    with pytest.raises(ValueError, match="max_action_delta"):
+        env.apply_action({"actions": np.full(14, 0.6, dtype=np.float32)})
+    assert backend.publish_action_calls[0] is not env._previous_action
+    np.testing.assert_array_equal(env._previous_action, np.zeros(14, dtype=np.float32))
+
     assert env.is_episode_complete() is True
     assert len(backend.publish_action_calls) == 1
 

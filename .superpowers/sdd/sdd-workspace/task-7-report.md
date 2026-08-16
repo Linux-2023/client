@@ -136,3 +136,59 @@ pytest: 1 failed in 0.14s
 - GREEN bridge suites: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py -q` -> `46 passed in 4.01s`.
 - GREEN compile check: `python -m py_compile examples/piper_dual/main_dual.py examples/piper_dual/env_dual.py examples/piper_dual/ros2_environment.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_ros2_environment.py && /usr/bin/python3 -m py_compile examples/piper_dual/ros2_bridge_process.py examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py` -> no output.
 - No hardware or physical action publishing was executed.
+
+## Task 7 backend publish snapshot ownership regression
+- Root cause: the first action-aliasing fix copied the caller-owned action into a local `validated` snapshot, but still passed that same ndarray to `backend.publish_action()` and stored the same object as `_previous_action`. A backend that retains and mutates its publish argument can therefore corrupt the environment-owned previous-action baseline and make later delta checks compare against backend-mutated state.
+- Decision: keep the caller boundary snapshot before delta checking, then hand `backend.publish_action()` its own `validated.copy()` and store a separate `validated.copy()` in `_previous_action` only after successful publication. Dry-run follows the same state-storage path, so dry-run `_previous_action` is also independently owned.
+- Ownership invariant: caller input, backend publish argument, and `_previous_action` are three distinct float32 snapshots for a successful publishing action. Backend in-place mutation after `publish_action()` cannot affect `_previous_action`; the next oversized action is rejected and no second publish occurs.
+- RED:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py::test_backend_publish_mutation_cannot_corrupt_previous_action_delta_baseline -q
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ test_backend_publish_mutation_cannot_corrupt_previous_action_delta_baseline __
+
+    def test_backend_publish_mutation_cannot_corrupt_previous_action_delta_baseline() -> None:
+        backend = MutatingPublishBackend()
+        env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True, max_action_delta=0.4)
+        first_action = np.zeros(14, dtype=np.float32)
+    
+        env.reset()
+        env.apply_action({"actions": first_action})
+    
+        assert backend.publish_action_calls[0] is not first_action
+        np.testing.assert_array_equal(backend.publish_action_calls[0], np.full(14, 0.5, dtype=np.float32))
+    
+>       with pytest.raises(ValueError, match="max_action_delta"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+examples/piper_dual/tests/test_ros2_environment.py:414: Failed
+=========================== short test summary info ============================
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_backend_publish_mutation_cannot_corrupt_previous_action_delta_baseline - Failed: DID NOT RAISE ValueError
+1 failed in 0.12s
+```
+- GREEN regression:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py::test_backend_publish_mutation_cannot_corrupt_previous_action_delta_baseline -q
+.                                                                        [100%]
+1 passed in 0.10s
+```
+- GREEN Task 7 environment/main suites:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py examples/piper_dual/tests/test_main_dual.py -q
+..........................................                               [100%]
+42 passed in 0.17s
+```
+- GREEN bridge protocol/codec/backend suites including YAML config:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py -q
+..............................................                           [100%]
+46 passed in 4.02s
+```
+- GREEN compile check:
+```text
+python -m py_compile examples/piper_dual/main_dual.py examples/piper_dual/env_dual.py examples/piper_dual/ros2_environment.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_ros2_environment.py && /usr/bin/python3 -m py_compile examples/piper_dual/ros2_bridge_process.py examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py
+(no output)
+```
+- No hardware or physical action publishing was executed.

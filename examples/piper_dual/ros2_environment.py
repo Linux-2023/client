@@ -162,12 +162,12 @@ class Ros2DualEnvironment(_environment.Environment):
 
         if self._publish_actions:
             try:
-                self._backend.publish_action(validated)
+                self._backend.publish_action(validated.copy())
             except Exception:
                 self._fail_episode()
                 raise
 
-        self._previous_action = validated
+        self._previous_action = validated.copy()
         self._step_count += 1
         if self._step_count >= self._max_episode_steps:
             self._done = True
