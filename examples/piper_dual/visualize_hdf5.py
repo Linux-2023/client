@@ -152,6 +152,29 @@ def _is_new_schema_episode(hdf5_path: str | Path) -> bool:
     return detect_schema(Path(hdf5_path)) == SCHEMA_VERSION
 
 
+def _looks_like_hdf5_visualizer_episode(hdf5_path: str | Path) -> bool:
+    try:
+        with h5py.File(hdf5_path, 'r') as episode:
+            if not isinstance(episode.get('observations/qpos'), h5py.Dataset):
+                return False
+            if 'schema_version' in episode.attrs:
+                return False
+            new_schema_paths = ('observations/state', 'action', 'observations/timestamp')
+            return not any(isinstance(episode.get(path), h5py.Dataset) for path in new_schema_paths)
+    except OSError:
+        return False
+
+
+def _official_legacy_data_tools_message(hdf5_path: str | Path) -> str:
+    return (
+        f"official legacy path-index HDF5 is not compatible with this in-repo visualizer: {hdf5_path}. "
+        "Use the official data_tools replay/visualization path instead, for example: "
+        "source /opt/ros/humble/setup.bash && source /home/agilex/data_ros/install/setup.bash && "
+        "ros2 launch data_tools run_data_publish.launch.py type:=aloha datasetDir:=<data_path> episodeIndex:=<episode_index>; "
+        "or run python3 /home/agilex/data_ros/src/data_tools/scripts/data_publish.py --type aloha --datasetDir <hdf5_path>."
+    )
+
+
 
 def _default_render_output_dir(hdf5_path: str | Path) -> Path:
     path = Path(hdf5_path)
@@ -186,15 +209,24 @@ def main():
 
     args = parser.parse_args()
 
-    schema = detect_schema(Path(args.hdf5_path))
+    try:
+        schema = detect_schema(Path(args.hdf5_path))
+    except ValueError as exc:
+        if not _looks_like_hdf5_visualizer_episode(args.hdf5_path):
+            raise
+        message = str(exc)
+        if message.startswith((f'malformed {SCHEMA_VERSION}', 'ambiguous HDF5 schema')):
+            raise
+        schema = None
+
     if schema == SCHEMA_VERSION:
         output_dir = Path(args.output_dir) if args.output_dir else _default_render_output_dir(args.hdf5_path)
         report = render_episode(Path(args.hdf5_path), output_dir, fps=args.fps, make_plots=not args.no_plots)
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return
 
-    if schema != LEGACY_SCHEMA_VERSION:
-        raise ValueError(f'unsupported HDF5 schema for {args.hdf5_path}: {schema!r}')
+    if schema == LEGACY_SCHEMA_VERSION:
+        raise ValueError(_official_legacy_data_tools_message(args.hdf5_path))
 
     visualizer = HDF5Visualizer(args.hdf5_path)
     visualizer.fps = args.fps

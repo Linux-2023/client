@@ -310,9 +310,87 @@ def test_visualize_hdf5_cli_reports_invalid_schema_and_exits_nonzero(tmp_path: P
     assert "✅ 可视化完成" not in completed.stdout
 
 
+def test_visualize_hdf5_main_rejects_official_legacy_path_index_with_data_tools_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    legacy_path = _write_official_legacy_episode(tmp_path / "legacy_official.hdf5")
+    calls: list[tuple[str, object]] = []
+
+    def fake_render_episode(path: Path, output_dir: Path, fps: int = 30, make_plots: bool = True) -> dict:
+        calls.append(("render", Path(path)))
+        raise AssertionError("render_episode should not be called for official legacy path-index HDF5")
+
+    class FakeVisualizer:
+        def __init__(self, hdf5_path: Path) -> None:
+            calls.append(("legacy_init", Path(hdf5_path)))
+            raise AssertionError("HDF5Visualizer should not be constructed for official legacy path-index HDF5")
+
+    monkeypatch.setattr(visualize_hdf5, "render_episode", fake_render_episode, raising=False)
+    monkeypatch.setattr(visualize_hdf5, "HDF5Visualizer", FakeVisualizer)
+    monkeypatch.setattr(sys, "argv", ["visualize_hdf5.py", "--hdf5_path", str(legacy_path), "--make_video"])
+
+    with pytest.raises(ValueError, match="official legacy.*path-index.*data_tools.*replay|data_tools.*official legacy.*path-index.*replay"):
+        visualize_hdf5.main()
+
+    captured = capsys.readouterr()
+    assert calls == []
+    assert "✅ 可视化完成" not in captured.out
+
+
+def test_visualize_hdf5_cli_reports_official_legacy_guidance_and_exits_nonzero(tmp_path: Path) -> None:
+    legacy_path = _write_official_legacy_episode(tmp_path / "legacy_official_cli.hdf5")
+    script_path = Path(visualize_hdf5.__file__).resolve()
+
+    completed = subprocess.run(
+        [sys.executable, str(script_path), "--hdf5_path", str(legacy_path), "--make_video"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "official legacy" in completed.stderr
+    assert "path-index" in completed.stderr
+    assert "data_tools" in completed.stderr
+    assert "replay" in completed.stderr or "visualization" in completed.stderr
+    assert "observations/qpos" not in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert "✅ 可视化完成" not in completed.stdout
+
+
+def test_visualize_hdf5_main_rejects_qpos_bearing_malformed_new_schema_without_falling_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    episode_path = _write_legacy_episode(tmp_path / "qpos_malformed_new.hdf5")
+    with h5py.File(episode_path, "a") as episode:
+        episode.attrs["schema_version"] = SCHEMA_VERSION
+
+    calls: list[tuple[str, object]] = []
+
+    def fake_render_episode(path: Path, output_dir: Path, fps: int = 30, make_plots: bool = True) -> dict:
+        calls.append(("render", Path(path)))
+        raise AssertionError("render_episode should not be called for qpos-bearing malformed new schema")
+
+    class FakeVisualizer:
+        def __init__(self, hdf5_path: Path) -> None:
+            calls.append(("legacy_init", Path(hdf5_path)))
+            raise AssertionError("HDF5Visualizer should not be constructed for qpos-bearing malformed new schema")
+
+    monkeypatch.setattr(visualize_hdf5, "render_episode", fake_render_episode, raising=False)
+    monkeypatch.setattr(visualize_hdf5, "HDF5Visualizer", FakeVisualizer)
+    monkeypatch.setattr(sys, "argv", ["visualize_hdf5.py", "--hdf5_path", str(episode_path), "--make_video"])
+
+    with pytest.raises(ValueError, match="malformed piper_dual_ros2_v1"):
+        visualize_hdf5.main()
+
+    captured = capsys.readouterr()
+    assert calls == []
+    assert "✅ 可视化完成" not in captured.out
+
+
 def test_visualize_hdf5_dispatches_new_schema_to_renderer_and_preserves_legacy_behavior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     new_path = _write_new_schema_episode(tmp_path / "new.hdf5")
-    legacy_path = _write_official_legacy_episode(tmp_path / "legacy_official.hdf5")
+    legacy_path = _write_legacy_episode(tmp_path / "legacy_qpos.hdf5")
 
     calls: list[tuple[str, object]] = []
 
@@ -331,6 +409,8 @@ def test_visualize_hdf5_dispatches_new_schema_to_renderer_and_preserves_legacy_b
     class FakeVisualizer:
         def __init__(self, hdf5_path: Path) -> None:
             calls.append(("legacy_init", Path(hdf5_path)))
+            self.fps = 30
+            self.images_data = {"cam_high": object(), "cam_left_wrist": object()}
 
         def plot_joint_curves(self, save_path: str | None = None) -> None:
             calls.append(("legacy_plot", save_path))
@@ -384,6 +464,7 @@ def test_visualize_hdf5_dispatches_new_schema_to_renderer_and_preserves_legacy_b
         ],
     )
     assert visualize_hdf5.main() is None
-    assert calls[0][0] == "legacy_init"
+    assert calls[0] == ("legacy_init", legacy_path)
     assert any(call[0] == "legacy_plot" and call[1] == "output/joint_curves.png" for call in calls)
+    assert ("legacy_video", ("cam_left_wrist", str(tmp_path / "legacy.mp4"), False)) in calls
     assert calls[-1][0] == "legacy_close"

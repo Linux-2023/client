@@ -244,3 +244,89 @@ python -m py_compile examples/piper_dual/render_dataset.py examples/piper_dual/t
 
 ### Invariant
 `detect_schema()` returns `legacy_official_hdf5` only when the legacy structure is unambiguous; if any new-schema required attr/path is present alongside all legacy required paths and `schema_version` is absent, it raises an ambiguous/mixed error instead of falling through to legacy. Complete new metadata/paths still returns `piper_dual_ros2_v1`, and malformed declared-new or unsupported schema versions keep their existing errors.
+
+## Official legacy visualizer dispatch fix
+
+### RED evidence
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_main_rejects_official_legacy_path_index_with_data_tools_guidance examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_cli_reports_official_legacy_guidance_and_exits_nonzero -q
+FAILED examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_main_rejects_official_legacy_path_index_with_data_tools_guidance - AssertionError: HDF5Visualizer should not be constructed for official legacy path-index HDF5
+FAILED examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_cli_reports_official_legacy_guidance_and_exits_nonzero - AssertionError: assert 'official legacy' in 'HDF5 文件中未找到关节数据 (observations/qpos)\n'
+pytest: 2 failed in 0.37s
+```
+
+### GREEN evidence
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_main_rejects_official_legacy_path_index_with_data_tools_guidance examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_cli_reports_official_legacy_guidance_and_exits_nonzero -q
+..                                                                       [100%]
+2 passed in 0.32s
+```
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_render_dataset.py -q
+...........                                                              [100%]
+11 passed in 0.75s
+```
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_legacy_compatibility.py examples/piper_dual/tests/test_ros2_end_to_end_mock.py -q
+...............                                                          [100%]
+15 passed in 0.33s
+```
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_action_adapter.py examples/piper_dual/tests/test_collector_state_machine.py examples/piper_dual/tests/test_dataset_schema.py examples/piper_dual/tests/test_frame_synchronizer.py examples/piper_dual/tests/test_legacy_compatibility.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_observation_adapter.py examples/piper_dual/tests/test_render_dataset.py examples/piper_dual/tests/test_ros2_end_to_end_mock.py examples/piper_dual/tests/test_ros2_environment.py examples/piper_dual/tests/test_streaming_hdf5.py -q
+........................................................................ [ 56%]
+........................................................                 [100%]
+128 passed in 1.20s
+```
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py -q
+..............................................                           [100%]
+46 passed in 4.03s
+```
+
+```text
+python -m py_compile examples/piper_dual/visualize_hdf5.py examples/piper_dual/tests/test_render_dataset.py && /usr/bin/python3 -m py_compile examples/piper_dual/visualize_hdf5.py examples/piper_dual/tests/test_render_dataset.py
+(no output)
+```
+
+### Direct official fixture smoke
+```text
+python examples/piper_dual/visualize_hdf5.py --hdf5_path /home/agilex/lgd_data/episode0/episode0.hdf5 --make_video
+official legacy path-index HDF5 is not compatible with this in-repo visualizer: /home/agilex/lgd_data/episode0/episode0.hdf5. Use the official data_tools replay/visualization path instead, for example: source /opt/ros/humble/setup.bash && source /home/agilex/data_ros/install/setup.bash && ros2 launch data_tools run_data_publish.launch.py type:=aloha datasetDir:=<data_path> episodeIndex:=<episode_index>; or run python3 /home/agilex/data_ros/src/data_tools/scripts/data_publish.py --type aloha --datasetDir <hdf5_path>.
+Command exited with code 1
+```
+
+### Dispatch invariant
+`visualize_hdf5.main()` now calls `detect_schema()` before any renderer construction. `piper_dual_ros2_v1` dispatches to `render_episode()`. Explicit `legacy_official_hdf5` path-index HDF5 raises a nonzero compatibility error directing users to official `data_tools` replay/visualization commands and never instantiates `HDF5Visualizer`. The old in-repo `HDF5Visualizer` remains reachable only when detection fails and the file has the old `/observations/qpos` visualizer layout; malformed new, ambiguous, and unrecognized files still propagate detector errors instead of falling through by filename.
+
+### Final qpos fallback tightening evidence
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_main_rejects_qpos_bearing_malformed_new_schema_without_falling_back -q
+FAILED examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_main_rejects_qpos_bearing_malformed_new_schema_without_falling_back - AssertionError: HDF5Visualizer should not be constructed for qpos-bearing malformed new schema
+pytest: 1 failed in 0.18s
+```
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_main_rejects_qpos_bearing_malformed_new_schema_without_falling_back examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_main_rejects_official_legacy_path_index_with_data_tools_guidance examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_cli_reports_official_legacy_guidance_and_exits_nonzero examples/piper_dual/tests/test_render_dataset.py::test_visualize_hdf5_dispatches_new_schema_to_renderer_and_preserves_legacy_behavior -q
+....                                                                     [100%]
+4 passed in 0.35s
+```
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_action_adapter.py examples/piper_dual/tests/test_collector_state_machine.py examples/piper_dual/tests/test_dataset_schema.py examples/piper_dual/tests/test_frame_synchronizer.py examples/piper_dual/tests/test_legacy_compatibility.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_observation_adapter.py examples/piper_dual/tests/test_render_dataset.py examples/piper_dual/tests/test_ros2_end_to_end_mock.py examples/piper_dual/tests/test_ros2_environment.py examples/piper_dual/tests/test_streaming_hdf5.py -q
+........................................................................ [ 55%]
+.........................................................                [100%]
+129 passed in 1.22s
+```
+
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py -q
+..............................................                           [100%]
+46 passed in 3.98s
+```
+
+### Final dispatch invariant
+`detect_schema()` remains the sole structural discriminator. `visualize_hdf5.main()` only falls back to the old `/observations/qpos` visualizer when schema detection fails and the file actually matches the old visualizer layout without `schema_version` or any new-schema marker paths. Official `legacy_official_hdf5` path-index files always raise the explicit data_tools replay/visualization guidance error. Malformed declared-new, ambiguous mixed, and unrecognized files still propagate detector errors instead of falling through by filename or by qpos alone.
