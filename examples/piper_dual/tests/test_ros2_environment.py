@@ -63,11 +63,15 @@ class FakeBackend:
         repeat_last: bool = False,
         next_frame_error: Exception | None = None,
         publish_action_failures: list[Exception] | tuple[Exception, ...] = (),
+        start_failures: list[Exception] | tuple[Exception, ...] = (),
+        clear_buffers_failures: list[Exception] | tuple[Exception, ...] = (),
     ) -> None:
         self.frames = deque(frames)
         self.repeat_last = repeat_last
         self.next_frame_error = next_frame_error
         self.publish_action_failures = deque(publish_action_failures)
+        self.start_failures = deque(start_failures)
+        self.clear_buffers_failures = deque(clear_buffers_failures)
         self.last_frame = frames[-1] if frames else None
         self.start_calls = 0
         self.clear_calls = 0
@@ -77,9 +81,13 @@ class FakeBackend:
 
     def start(self) -> None:
         self.start_calls += 1
+        if self.start_failures:
+            raise self.start_failures.popleft()
 
     def clear_buffers(self) -> None:
         self.clear_calls += 1
+        if self.clear_buffers_failures:
+            raise self.clear_buffers_failures.popleft()
 
     def next_frame(self, timeout: float) -> SynchronizedFrame:
         self.next_frame_calls += 1
@@ -117,21 +125,59 @@ def test_reset_starts_backend_and_clears_buffers_without_publishing_actions(back
     assert env.is_episode_complete() is False
 
 
-def test_get_observation_maps_ros2_frame_to_model_contract() -> None:
-    backend = FakeBackend([_make_frame(2.0)])
-    env = Ros2DualEnvironment(backend=backend, prompt="stack", watchdog_timeout=0.1)
+@pytest.mark.parametrize("max_action_delta", [np.nan, np.inf, -np.inf])
+def test_constructor_rejects_nonfinite_max_action_delta(max_action_delta: float) -> None:
+    with pytest.raises(ValueError, match="finite non-negative"):
+        Ros2DualEnvironment(backend=FakeBackend(), max_action_delta=max_action_delta)
+
+
+def test_constructor_accepts_zero_max_action_delta() -> None:
+    backend = FakeBackend()
+    env = Ros2DualEnvironment(
+        backend=backend,
+        dry_run=False,
+        publish_actions=True,
+        max_action_delta=0.0,
+    )
 
     env.reset()
-    observation = env.get_observation()
+    env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
+    env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
 
-    assert set(observation) == {"observation.state", "images", "timestamps", "sync_error", "task"}
-    np.testing.assert_array_equal(observation["observation.state"], np.arange(14, dtype=np.float32))
-    assert observation["observation.state"].dtype == np.float32
-    assert observation["task"] == "stack"
-    assert set(observation["images"]) == {spec.name for spec in DEFAULT_CAMERA_SPECS}
-    for image in observation["images"].values():
-        assert image.shape == (3, 224, 224)
-        assert image.dtype == np.uint8
+    assert len(backend.publish_action_calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected_error"),
+    [
+        pytest.param(
+            FakeBackend(start_failures=[RuntimeError("start failed")]),
+            "start failed",
+            id="start",
+        ),
+        pytest.param(
+            FakeBackend(clear_buffers_failures=[RuntimeError("clear failed")]),
+            "clear failed",
+            id="clear-buffers",
+        ),
+    ],
+)
+def test_reset_stage_bridge_failure_latches_action_publishing_until_new_environment(
+    backend: FakeBackend,
+    expected_error: str,
+) -> None:
+    env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True)
+
+    with pytest.raises(RuntimeError, match=expected_error) as exc_info:
+        env.reset()
+
+    assert str(exc_info.value) == expected_error
+    assert env.is_episode_complete() is True
+
+    env.reset()
+    env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
+
+    assert backend.publish_action_calls == []
 
 
 def test_get_observation_raises_when_required_camera_is_missing() -> None:
@@ -165,6 +211,7 @@ def test_apply_action_rejects_invalid_14d_actions(action: list[float]) -> None:
 
     assert backend.publish_action_calls == []
 
+
 def test_invalid_action_marks_episode_complete_and_disables_future_publish() -> None:
     backend = FakeBackend()
     env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True)
@@ -177,6 +224,22 @@ def test_invalid_action_marks_episode_complete_and_disables_future_publish() -> 
     assert env.is_episode_complete() is True
     env.apply_action({"actions": np.arange(14, dtype=np.float32)})
     assert backend.publish_action_calls == []
+
+def test_get_observation_maps_ros2_frame_to_model_contract() -> None:
+    backend = FakeBackend([_make_frame(2.0)])
+    env = Ros2DualEnvironment(backend=backend, prompt="stack", watchdog_timeout=0.1)
+
+    env.reset()
+    observation = env.get_observation()
+
+    assert set(observation) == {"observation.state", "images", "timestamps", "sync_error", "task"}
+    np.testing.assert_array_equal(observation["observation.state"], np.arange(14, dtype=np.float32))
+    assert observation["observation.state"].dtype == np.float32
+    assert observation["task"] == "stack"
+    assert set(observation["images"]) == {spec.name for spec in DEFAULT_CAMERA_SPECS}
+    for image in observation["images"].values():
+        assert image.shape == (3, 224, 224)
+        assert image.dtype == np.uint8
 
 
 def _trigger_stale_observation_fault(env: Ros2DualEnvironment) -> None:

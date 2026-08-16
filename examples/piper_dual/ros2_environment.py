@@ -44,8 +44,12 @@ class Ros2DualEnvironment(_environment.Environment):
             raise ValueError("prompt must be a string")
         if dry_run and publish_actions:
             raise ValueError("publish_actions requires dry_run=False")
-        if max_action_delta is not None and max_action_delta < 0:
-            raise ValueError("max_action_delta must be non-negative")
+        if max_action_delta is None:
+            max_action_delta_value = None
+        else:
+            max_action_delta_value = float(max_action_delta)
+            if not np.isfinite(max_action_delta_value) or max_action_delta_value < 0:
+                raise ValueError("max_action_delta must be finite non-negative")
 
         self._backend = backend or Ros2BackendClient(
             bridge_python=bridge_python,
@@ -63,7 +67,7 @@ class Ros2DualEnvironment(_environment.Environment):
         self._publish_actions_requested = bool(publish_actions) and not self._dry_run
         self._publish_actions_locked = False
         self._publish_actions = self._publish_actions_requested
-        self._max_action_delta = None if max_action_delta is None else float(max_action_delta)
+        self._max_action_delta = max_action_delta_value
         self._done = True
         self._closed = False
         self._step_count = 0
@@ -73,8 +77,12 @@ class Ros2DualEnvironment(_environment.Environment):
     @override
     def reset(self) -> None:
         self._ensure_open()
-        self._backend.start()
-        self._backend.clear_buffers()
+        try:
+            self._backend.start()
+            self._backend.clear_buffers()
+        except Exception:
+            self._fail_episode()
+            raise
         self._done = False
         self._step_count = 0
         self._last_observation_timestamp = None
