@@ -12,6 +12,7 @@ import queue
 import sys
 import threading
 from typing import Any
+import yaml
 
 import cv_bridge
 import rclpy
@@ -97,10 +98,26 @@ def validate_action_request(request: JsonObject) -> dict[str, list[float]]:
 def _load_config(path: str | None) -> JsonObject:
     if path is None:
         return {}
-    with pathlib.Path(path).open("r", encoding="utf-8") as stream:
-        data = json.load(stream)
+
+    config_path = pathlib.Path(path)
+    suffix = config_path.suffix.lower()
+    try:
+        with config_path.open("r", encoding="utf-8") as stream:
+            if suffix in {".yaml", ".yml"}:
+                data = yaml.safe_load(stream)
+            elif suffix == ".json":
+                data = json.load(stream)
+            else:
+                raise ValueError(f"Unsupported bridge config extension {suffix!r}; expected .json, .yaml, or .yml")
+    except FileNotFoundError as exc:
+        raise ValueError(f"Bridge config file not found: {config_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Malformed JSON bridge config {config_path}: {exc.msg}") from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Malformed YAML bridge config {config_path}: {exc}") from exc
+
     if not isinstance(data, dict):
-        raise ValueError("Bridge config must be a JSON object")
+        raise ValueError("Bridge config must be a mapping object")
     return data
 
 
@@ -273,7 +290,7 @@ def _stdin_reader(node: PiperRos2Bridge, writer: LockedJsonLineWriter) -> None:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Piper dual ROS 2 bridge process")
-    parser.add_argument("--config", help="Path to optional JSON bridge config")
+    parser.add_argument("--config", help="Path to optional YAML or JSON bridge config")
     parser.add_argument("--dry-run", action="store_true", help="Never publish joint action messages")
     parser.add_argument("--publish-actions", action="store_true", help="Enable publishing validated joint actions")
     return parser.parse_args(argv)
