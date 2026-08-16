@@ -377,6 +377,22 @@ def test_apply_action_enforces_configured_per_step_delta_limit() -> None:
     assert env.is_episode_complete() is True
     assert len(backend.publish_action_calls) == 1
 
+def test_apply_action_snapshots_float32_caller_arrays_before_publish_and_delta_check() -> None:
+    backend = FakeBackend()
+    env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True, max_action_delta=0.4)
+    first_action = np.zeros(14, dtype=np.float32)
+
+    env.reset()
+    env.apply_action({"actions": first_action})
+    first_action += np.float32(0.5)
+
+    with pytest.raises(ValueError, match="max_action_delta"):
+        env.apply_action({"actions": np.full(14, 0.6, dtype=np.float32)})
+
+    np.testing.assert_array_equal(backend.publish_action_calls[0], np.zeros(14, dtype=np.float32))
+    assert env.is_episode_complete() is True
+    assert len(backend.publish_action_calls) == 1
+
 
 
 def test_stale_observation_watchdog_raises_when_timestamp_stops_advancing() -> None:

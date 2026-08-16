@@ -104,3 +104,35 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test
 ```
 - Help check: `python examples/piper_dual/main_dual.py --help` remained readable and showed both dashed canonical flags and the preserved underscore aliases.
 - Compile check: `python -m py_compile examples/piper_dual/main_dual.py examples/piper_dual/env_dual.py examples/piper_dual/ros2_environment.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_ros2_environment.py` produced no output.
+
+## Task 7 bridge YAML config compatibility
+- Root cause: the shipped `ros2_piper_dual.yaml` is YAML, while `_load_config()` previously called `json.load()` for every extension.
+- Decision: parse `.yaml`/`.yml` with `yaml.safe_load()` and `.json` with `json.load()`. Unsupported extensions, malformed documents, missing files, and non-mapping roots fail descriptively; unsafe YAML constructors are not enabled.
+- RED:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_bridge_codec.py::test_load_config_accepts_shipped_default_yaml_bridge_contract -q
+FAILED: _load_config() attempted JSON decoding of the shipped YAML and raised JSONDecodeError.
+```
+- GREEN config regressions: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_bridge_codec.py -q` -> `13 passed in 0.28s`.
+- Bridge protocol/process verification: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py -q` -> `46 passed in 3.99s`.
+- Task 7 focused verification: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py examples/piper_dual/tests/test_main_dual.py -q` -> `40 passed in 0.16s`.
+- Compile verification: `/usr/bin/python3 -m py_compile examples/piper_dual/ros2_bridge_process.py examples/piper_dual/tests/test_ros2_bridge_codec.py` and the Task 7 modules completed with no output.
+- No-hardware config smoke: `/usr/bin/python3` loaded `examples/piper_dual/ros2_piper_dual.yaml` through `_load_config()` and printed `piper_dual_ros2_v1 3` (schema version and camera count); no ROS node was instantiated.
+- No hardware or physical action publishing was executed.
+
+## Task 7 action aliasing snapshot regression
+- Root cause: `ActionAdapter.validate()` intentionally preserves zero-copy behavior for already-float32 ndarrays, but `Ros2DualEnvironment.apply_action()` was forwarding that alias directly into delta comparison, backend publication, and `_previous_action` storage.
+- Decision: snapshot the validated action immediately inside `apply_action()` with `np.array(validated, dtype=np.float32, copy=True)` before any delta check, publication, or state storage. `ActionAdapter` remains unchanged.
+- Ownership invariant: after `apply_action()` returns, caller-owned mutation cannot affect the environment's `_previous_action` or any backend-held published action snapshot, even when the backend retains references instead of copying inputs.
+- RED:
+```text
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py::test_apply_action_snapshots_float32_caller_arrays_before_publish_and_delta_check -q
+FAILED examples/piper_dual/tests/test_ros2_environment.py::test_apply_action_snapshots_float32_caller_arrays_before_publish_and_delta_check - Failed: DID NOT RAISE ValueError
+pytest: 1 failed in 0.14s
+```
+- Additional RED evidence before reordering the assertions showed the backend-retained publish argument was the caller alias: the same regression failed with `Arrays are not equal`, `Mismatched elements: 14 / 14 (100%)`, `ACTUAL: array([0.5, ...], dtype=float32)`, and `DESIRED: array([0., ...], dtype=float32)`.
+- GREEN regression: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py::test_apply_action_snapshots_float32_caller_arrays_before_publish_and_delta_check -q` -> `1 passed in 0.09s`.
+- GREEN Task 7 focused suites: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest examples/piper_dual/tests/test_ros2_environment.py examples/piper_dual/tests/test_main_dual.py -q` -> `41 passed in 0.17s`.
+- GREEN bridge suites: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py -q` -> `46 passed in 4.01s`.
+- GREEN compile check: `python -m py_compile examples/piper_dual/main_dual.py examples/piper_dual/env_dual.py examples/piper_dual/ros2_environment.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_ros2_environment.py && /usr/bin/python3 -m py_compile examples/piper_dual/ros2_bridge_process.py examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py examples/piper_dual/tests/test_ros2_backend.py` -> no output.
+- No hardware or physical action publishing was executed.

@@ -151,6 +151,7 @@ class Ros2DualEnvironment(_environment.Environment):
         except Exception:
             self._fail_episode()
             raise
+        validated = np.array(validated, dtype=np.float32, copy=True)
         if self._max_action_delta is not None and self._previous_action is not None:
             delta = float(np.max(np.abs(validated - self._previous_action)))
             if delta > self._max_action_delta:
