@@ -29,10 +29,10 @@ class Args:
     out_dir: Path = Path("data/piper_dual/videos")
     seed: int = 0
     max_action_horizon: int = 50
-    action_horizon: int = 30
+    action_horizon: int = 10
     fps: int = 30
     actions_during_latency: int = 5
-    num_steps: int = 8000
+    num_steps: int = 800
     num_episodes: int = 1
     run_tag: str = ""
     mode: str = "remote"
@@ -44,19 +44,19 @@ class Args:
     control_stack: Literal["local-ros", "official-ros", "direct-sdk"] | None = None
     max_action_delta: float | None = None
     host: str = "127.0.0.1"
-    port: int = 8001
+    port: int = 8000
     display: bool = False
     high_camera_id: str = "148522073709"
     left_wrist_camera_id: int = 0
     right_wrist_camera_id: int = 8
     left_can_port: str = "can_left"
     right_can_port: str = "can_right"
-    prompt: str = "Place the red and blue blocks on the wooden board"
-    use_async: bool = False
+    prompt: str = "Fold_the_towel"
+    use_async: bool = True
     use_rtc: bool = False
     gripper_norm: bool = True
     tele_mode: bool = False
-    record_mode: bool = False
+    record_mode: bool = True
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -123,6 +123,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=Args.publish_actions,
         help="Allow the ROS 2 backend to publish validated actions",
+    )
+    parser.add_argument(
+        "--max-action-delta",
+        type=float,
+        default=Args.max_action_delta,
+        help="Optional per-step action delta limit for the ROS 2 environment",
     )
     parser.add_argument("--host", type=str, default=Args.host, help="Remote websocket host")
     parser.add_argument("--port", type=int, default=Args.port, help="Remote websocket port")

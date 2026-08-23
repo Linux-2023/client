@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import ast
+import subprocess
 import sys
 import types
 
@@ -12,6 +14,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import env_dual
 import main_dual
+
+def _indexed_args_defaults() -> dict[str, object]:
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        ['git', 'show', ':examples/piper_dual/main_dual.py'],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    tree = ast.parse(result.stdout)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == 'Args':
+            defaults: dict[str, object] = {}
+            for statement in node.body:
+                if not isinstance(statement, ast.AnnAssign) or not isinstance(statement.target, ast.Name):
+                    continue
+                try:
+                    defaults[statement.target.id] = ast.literal_eval(statement.value)
+                except ValueError:
+                    continue
+            return defaults
+    raise AssertionError('Args dataclass not found in indexed main_dual.py')
+
+
+def test_indexed_task4_defaults_keep_only_stack_and_safety_changes() -> None:
+    defaults = _indexed_args_defaults()
+
+    assert defaults['action_horizon'] == 10
+    assert defaults['num_steps'] == 800
+    assert defaults['port'] == 8000
+    assert defaults['prompt'] == 'Fold_the_towel'
+    assert defaults['use_async'] is True
+    assert defaults['record_mode'] is True
+    assert defaults['backend'] == 'ros2'
+    assert defaults['dry_run'] is True
+    assert defaults['publish_actions'] is False
 
 
 def test_validate_backend_contract_rejects_publish_actions_without_ros2_backend() -> None:
@@ -80,13 +120,26 @@ def test_resolve_control_stack_defaults_to_official_ros_for_ros2() -> None:
     assert main_dual._resolve_control_stack(main_dual.Args(backend='sdk', control_stack='local-ros')) is None
 
 
+def test_parse_args_accepts_max_action_delta_for_ros2_backend() -> None:
+    args = main_dual.parse_args(['--backend', 'ros2', '--max-action-delta', '0.25'])
+
+    assert args.max_action_delta == pytest.approx(0.25)
+
+
+def test_environment_kwargs_forwards_max_action_delta_only_for_ros2_backend() -> None:
+    ros2_kwargs = main_dual._environment_kwargs(main_dual.Args(backend='ros2', max_action_delta=0.25))
+    sdk_kwargs = main_dual._environment_kwargs(main_dual.Args(backend='sdk', max_action_delta=0.25))
+
+    assert ros2_kwargs['max_action_delta'] == pytest.approx(0.25)
+    assert 'max_action_delta' not in sdk_kwargs
+
+
 def test_parse_args_maps_ros2_safety_flags_into_args() -> None:
     args = main_dual.parse_args(['--backend', 'ros2', '--no-dry-run', '--publish-actions'])
 
     assert args.backend == 'ros2'
     assert args.dry_run is False
     assert args.publish_actions is True
-
 
 def test_parse_args_accepts_documented_underscore_pi05_options() -> None:
     args = main_dual.parse_args([
@@ -148,7 +201,7 @@ def test_build_environment_omits_ros2_flags_for_sdk_backend(monkeypatch) -> None
 
     monkeypatch.setattr(env_dual, 'create_dual_environment', fake_create_dual_environment)
 
-    args = main_dual.Args(backend='sdk')
+    args = main_dual.Args(backend='sdk', prompt='Fold the towel')
     environment = main_dual._build_environment(args)
 
     assert environment is not None
@@ -158,7 +211,7 @@ def test_build_environment_omits_ros2_flags_for_sdk_backend(monkeypatch) -> None
     assert kwargs['left_can_port'] == 'can_left'
     assert kwargs['right_can_port'] == 'can_right'
     assert kwargs['camera_fps'] == 30
-    assert kwargs['prompt'] == 'Place the red and blue blocks on the wooden board'
+    assert kwargs['prompt'] == 'Fold the towel'
     assert 'bridge_python' not in kwargs
     assert 'ros2_config' not in kwargs
     assert 'dry_run' not in kwargs
