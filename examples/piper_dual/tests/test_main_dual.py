@@ -28,26 +28,56 @@ def test_validate_backend_contract_rejects_publish_actions_while_dry_running() -
         main_dual._validate_backend_contract(args)
 
 
-def test_contract_summary_mentions_safe_defaults_and_gates() -> None:
+def test_validate_backend_contract_rejects_control_stack_for_sdk_backend() -> None:
+    args = main_dual.Args(backend='sdk', control_stack='local-ros')
+
+    with pytest.raises(ValueError, match='--control-stack requires --backend ros2'):
+        main_dual._validate_backend_contract(args)
+
+
+def test_contract_summary_mentions_safe_defaults_and_selected_stack() -> None:
     summary = main_dual.contract_summary(main_dual.Args())
 
-    assert 'backend=sdk' in summary
-    assert 'ROS 2 defaults to dry-run' in summary
+    assert 'backend=ros2' in summary
+    assert 'selected control stack=official-ros' in summary
+    assert 'ROS 2 defaults to dry-run: True' in summary
     assert 'publish-actions requires --backend ros2 and --no-dry-run' in summary
 
 
-def test_build_arg_parser_exposes_ros2_safety_flags() -> None:
+def test_build_arg_parser_exposes_ros2_control_stack_and_safety_flags() -> None:
     help_text = main_dual.build_arg_parser().format_help()
 
     for flag in (
         '--backend',
         '--bridge-python',
         '--ros2-config',
+        '--control-stack',
         '--dry-run',
         '--no-dry-run',
         '--publish-actions',
     ):
         assert flag in help_text
+
+
+def test_parse_args_defaults_to_safe_ros2_behavior() -> None:
+    args = main_dual.parse_args([])
+
+    assert args.backend == 'ros2'
+    assert args.control_stack is None
+    assert args.dry_run is True
+    assert args.publish_actions is False
+
+
+def test_parse_args_accepts_ros2_control_stack_choices() -> None:
+    for name in ('local-ros', 'official-ros', 'direct-sdk'):
+        args = main_dual.parse_args(['--backend', 'ros2', '--control-stack', name])
+        assert args.control_stack == name
+
+
+def test_resolve_control_stack_defaults_to_official_ros_for_ros2() -> None:
+    assert main_dual._resolve_control_stack(main_dual.Args()) == 'official-ros'
+    assert main_dual._resolve_control_stack(main_dual.Args(backend='ros2', control_stack='local-ros')) == 'local-ros'
+    assert main_dual._resolve_control_stack(main_dual.Args(backend='sdk', control_stack='local-ros')) is None
 
 
 def test_parse_args_maps_ros2_safety_flags_into_args() -> None:
@@ -116,9 +146,9 @@ def test_build_environment_omits_ros2_flags_for_sdk_backend(monkeypatch) -> None
         captured['kwargs'] = kwargs
         return object()
 
-    monkeypatch.setattr(main_dual, 'create_dual_environment', fake_create_dual_environment)
+    monkeypatch.setattr(env_dual, 'create_dual_environment', fake_create_dual_environment)
 
-    args = main_dual.Args()
+    args = main_dual.Args(backend='sdk')
     environment = main_dual._build_environment(args)
 
     assert environment is not None
@@ -128,11 +158,12 @@ def test_build_environment_omits_ros2_flags_for_sdk_backend(monkeypatch) -> None
     assert kwargs['left_can_port'] == 'can_left'
     assert kwargs['right_can_port'] == 'can_right'
     assert kwargs['camera_fps'] == 30
-    assert kwargs['prompt'] == 'Fold_the_towel'
+    assert kwargs['prompt'] == 'Place the red and blue blocks on the wooden board'
     assert 'bridge_python' not in kwargs
     assert 'ros2_config' not in kwargs
     assert 'dry_run' not in kwargs
     assert 'publish_actions' not in kwargs
+    assert 'control_stack' not in kwargs
 
 
 def test_build_environment_passes_ros2_flags_for_ros2_backend(monkeypatch) -> None:
@@ -143,7 +174,7 @@ def test_build_environment_passes_ros2_flags_for_ros2_backend(monkeypatch) -> No
         captured['kwargs'] = kwargs
         return object()
 
-    monkeypatch.setattr(main_dual, 'create_dual_environment', fake_create_dual_environment)
+    monkeypatch.setattr(env_dual, 'create_dual_environment', fake_create_dual_environment)
 
     args = main_dual.Args(
         backend='ros2',
@@ -151,6 +182,7 @@ def test_build_environment_passes_ros2_flags_for_ros2_backend(monkeypatch) -> No
         ros2_config=Path('/tmp/config'),
         dry_run=False,
         publish_actions=True,
+        control_stack='direct-sdk',
         prompt='Fold the towel',
     )
     environment = main_dual._build_environment(args)
@@ -163,6 +195,7 @@ def test_build_environment_passes_ros2_flags_for_ros2_backend(monkeypatch) -> No
     assert kwargs['ros2_config'] == Path('/tmp/config')
     assert kwargs['dry_run'] is False
     assert kwargs['publish_actions'] is True
+    assert kwargs['control_stack'] == 'direct-sdk'
     assert kwargs['prompt'] == 'Fold the towel'
 
 

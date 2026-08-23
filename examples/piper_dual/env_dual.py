@@ -36,6 +36,7 @@ def create_dual_environment(backend: str = "sdk", **kwargs):
         "ros2_config",
         "dry_run",
         "publish_actions",
+        "control_stack",
         "observation_adapter",
         "action_adapter",
         "backend_client",

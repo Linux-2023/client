@@ -191,7 +191,7 @@ def test_constructor_accepts_zero_max_action_delta() -> None:
 
 
 
-@pytest.mark.parametrize("control_stack", ["local-ros", "direct-sdk"])
+@pytest.mark.parametrize("control_stack", ["local-ros", "official-ros", "direct-sdk"])
 def test_environment_forwards_control_stack_to_backend(monkeypatch, control_stack: str) -> None:
     captured: list[dict[str, object]] = []
 
@@ -210,6 +210,12 @@ def test_environment_forwards_control_stack_to_backend(monkeypatch, control_stac
     )
 
     assert captured[-1]["control_stack"] == control_stack
+
+
+def test_environment_rejects_live_publishing_while_dry_running() -> None:
+    with pytest.raises(ValueError, match="publish_actions requires dry_run=False"):
+        Ros2DualEnvironment(backend=FakeBackend(), dry_run=True, publish_actions=True)
+
 
 @pytest.mark.parametrize(
     ("backend", "expected_error"),

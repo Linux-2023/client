@@ -16,7 +16,6 @@ _OPENPI_CLIENT_SRC = _PROJECT_ROOT / "packages/openpi-client/src"
 if str(_OPENPI_CLIENT_SRC) not in sys.path:
     sys.path.insert(0, str(_OPENPI_CLIENT_SRC))
 
-from env_dual import create_dual_environment
 
 DEFAULT_BRIDGE_PYTHON = Path("/usr/bin/python3")
 DEFAULT_ROS2_CONFIG = Path(__file__).resolve().with_name("ros2_piper_dual.yaml")
@@ -30,33 +29,34 @@ class Args:
     out_dir: Path = Path("data/piper_dual/videos")
     seed: int = 0
     max_action_horizon: int = 50
-    action_horizon: int = 10
+    action_horizon: int = 30
     fps: int = 30
     actions_during_latency: int = 5
-    num_steps: int = 800
+    num_steps: int = 8000
     num_episodes: int = 1
     run_tag: str = ""
     mode: str = "remote"
-    backend: Literal["sdk", "ros2"] = "sdk"
+    backend: Literal["sdk", "ros2"] = "ros2"
     bridge_python: Path = DEFAULT_BRIDGE_PYTHON
     ros2_config: Path = DEFAULT_ROS2_CONFIG
     dry_run: bool = True
     publish_actions: bool = False
+    control_stack: Literal["local-ros", "official-ros", "direct-sdk"] | None = None
     max_action_delta: float | None = None
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = 8001
     display: bool = False
     high_camera_id: str = "148522073709"
     left_wrist_camera_id: int = 0
     right_wrist_camera_id: int = 8
     left_can_port: str = "can_left"
     right_can_port: str = "can_right"
-    prompt: str = "Fold_the_towel"
-    use_async: bool = True
+    prompt: str = "Place the red and blue blocks on the wooden board"
+    use_async: bool = False
     use_rtc: bool = False
     gripper_norm: bool = True
     tele_mode: bool = False
-    record_mode: bool = True
+    record_mode: bool = False
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -107,6 +107,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="ROS 2 bridge configuration file",
     )
     parser.add_argument(
+        "--control-stack",
+        choices=("local-ros", "official-ros", "direct-sdk"),
+        default=Args.control_stack,
+        help="Select the ROS 2 control stack profile",
+    )
+    parser.add_argument(
         "--dry-run",
         action=argparse.BooleanOptionalAction,
         default=Args.dry_run,
@@ -117,12 +123,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=Args.publish_actions,
         help="Allow the ROS 2 backend to publish validated actions",
-    )
-    parser.add_argument(
-        "--max-action-delta",
-        type=float,
-        default=Args.max_action_delta,
-        help="Optional per-step action delta limit for the ROS 2 environment",
     )
     parser.add_argument("--host", type=str, default=Args.host, help="Remote websocket host")
     parser.add_argument("--port", type=int, default=Args.port, help="Remote websocket port")
@@ -220,7 +220,15 @@ def parse_args(argv: list[str] | None = None) -> Args:
     return _namespace_to_args(build_arg_parser().parse_args(argv))
 
 
+def _resolve_control_stack(args: Args) -> str | None:
+    if args.backend == "sdk":
+        return None
+    return args.control_stack or "official-ros"
+
+
 def _validate_backend_contract(args: Args) -> None:
+    if args.control_stack is not None and args.backend != "ros2":
+        raise ValueError("--control-stack requires --backend ros2")
     if args.publish_actions and args.backend != "ros2":
         raise ValueError("--publish-actions requires --backend ros2")
     if args.publish_actions and args.dry_run:
@@ -228,12 +236,13 @@ def _validate_backend_contract(args: Args) -> None:
 
 
 def contract_summary(args: Args) -> str:
+    control_stack = _resolve_control_stack(args)
     lines = [
         "Contract summary:",
         f"- backend={args.backend}",
+        f"- selected control stack={control_stack}",
         f"- mode={args.mode}",
         f"- ROS 2 defaults to dry-run: {args.dry_run if args.backend == 'ros2' else True}",
-        "- SDK path remains the default backend",
         "- publish-actions requires --backend ros2 and --no-dry-run",
         f"- ROS 2 bridge python: {args.bridge_python}",
         f"- ROS 2 config: {args.ros2_config}",
@@ -267,6 +276,7 @@ def _environment_kwargs(args: Args) -> dict[str, Any]:
             ros2_config=args.ros2_config,
             dry_run=args.dry_run,
             publish_actions=args.publish_actions,
+            control_stack=_resolve_control_stack(args),
         )
         if args.max_action_delta is not None:
             kwargs["max_action_delta"] = args.max_action_delta
@@ -274,6 +284,8 @@ def _environment_kwargs(args: Args) -> dict[str, Any]:
 
 
 def _build_environment(args: Args) -> Any:
+    from env_dual import create_dual_environment
+
     return create_dual_environment(backend=args.backend, **_environment_kwargs(args))
 
 
@@ -359,6 +371,7 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
         environment = _build_environment(args)
         print("✅ 双臂 Piper 环境初始化成功")
         print(f"   - backend: {args.backend}")
+        print(f"   - selected control stack: {_resolve_control_stack(args)}")
         if args.backend == "ros2":
             print(f"   - bridge python: {args.bridge_python}")
             print(f"   - ros2 config: {args.ros2_config}")
