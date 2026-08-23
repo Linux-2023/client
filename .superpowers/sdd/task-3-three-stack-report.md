@@ -82,3 +82,45 @@ None for the focused fake-controller acceptance. No physical hardware/CAN test w
 
 ## Commit
 61e06e8c9919b6179cc816447a6bd3bc733c0052
+
+## Review fix RED
+Command:
+
+```bash
+/usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_piper_direct_sdk_adapter.py
+```
+
+Output:
+
+```text
+FAILED examples/piper_dual/tests/test_piper_direct_sdk_adapter.py::test_apply_action_rejects_bool_string_and_non_real_scalars_before_conversion[True]
+FAILED examples/piper_dual/tests/test_piper_direct_sdk_adapter.py::test_apply_action_rejects_bool_string_and_non_real_scalars_before_conversion[0.0]
+FAILED examples/piper_dual/tests/test_piper_direct_sdk_adapter.py::test_apply_action_rejects_bool_string_and_non_real_scalars_before_conversion[bad_value2]
+FAILED examples/piper_dual/tests/test_piper_direct_sdk_adapter.py::test_missing_status_field_preserves_available_real_fault_fields
+FAILED examples/piper_dual/tests/test_piper_direct_sdk_adapter.py::test_shutdown_is_idempotent
+FAILED examples/piper_dual/tests/test_piper_direct_sdk_adapter.py::test_second_arm_setup_failure_cleans_first_setup_arm_and_shuts_down_rclpy
+FAILED examples/piper_dual/tests/test_piper_direct_sdk_adapter.py::test_ros_entity_construction_failure_cleans_setup_arms_and_shuts_down_rclpy
+pytest: 7 failed, 14 passed in 0.27s
+
+Command exited with code 1
+```
+
+## Review fix GREEN
+Command:
+
+```bash
+/usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_piper_direct_sdk_adapter.py
+```
+
+Output:
+
+```text
+.....................                                                    [100%]
+21 passed in 0.16s
+```
+
+## Review fix notes
+- Startup failure cleanup now covers right-arm setup failures and later ROS entity construction failures, cleaning successfully setup arms and shutting down rclpy from `main()` even when node assignment never completes.
+- Status projection reads fields independently, preserves available SDK fault fields, maps SDK `mode_feed` to ROS `mode_feedback`, projects missing status/driver data as outward `ctrl_mode=0`, and latches the exact unsafe reason.
+- Action validation now rejects bools, strings, complex/non-real values before float conversion while accepting Python and NumPy real scalar int/float values.
+- Shutdown is idempotent; repeated calls do not re-disable or re-disconnect already cleaned arms.

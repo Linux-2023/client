@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import sys
 
 import pytest
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -39,6 +40,7 @@ class FakeRawSdk:
 
 class FakeController:
     instances: list["FakeController"] = []
+    setup_failures: dict[str, Exception] = {}
 
     def __init__(self, name: str) -> None:
         self.name = name
@@ -52,6 +54,8 @@ class FakeController:
         FakeController.instances.append(self)
 
     def set_up(self, can_port: str) -> None:
+        if self.name in self.setup_failures:
+            raise self.setup_failures[self.name]
         self.can_port = can_port
 
     def get_state(self):
@@ -101,8 +105,10 @@ def _joint_message(values):
 @pytest.fixture(autouse=True)
 def _reset_fake_instances():
     FakeController.instances = []
+    FakeController.setup_failures = {}
     yield
     FakeController.instances = []
+    FakeController.setup_failures = {}
 
 
 def make_fake_adapter(monkeypatch):
@@ -182,6 +188,26 @@ def test_apply_action_rejects_invalid_action_vectors(values):
         arm.apply_action(values)
 
 
+@pytest.mark.parametrize("bad_value", [True, "0.0", 1 + 0j])
+def test_apply_action_rejects_bool_string_and_non_real_scalars_before_conversion(bad_value):
+    arm = DirectSdkArm("left", "can_left", controller_factory=FakeController)
+    arm.setup()
+
+    with pytest.raises(ValueError, match="real numeric"):
+        arm.apply_action([bad_value, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    assert arm.controller.set_joint_calls == []
+    assert arm.controller.set_gripper_calls == []
+
+
+def test_apply_action_accepts_numpy_real_scalars():
+    arm = DirectSdkArm("left", "can_left", controller_factory=FakeController)
+    arm.setup()
+
+    arm.apply_action([np.float64(0.0), np.float32(0.1), np.int64(0), 0.0, 0.0, 0.0, np.float64(0.035)])
+
+    assert arm.controller.set_gripper_calls == [pytest.approx(0.5)]
+
+
 def test_adapter_publishes_actual_feedback_and_separate_command_echo(monkeypatch):
     node, capture = make_fake_adapter(monkeypatch)
     left = node.left_arm.controller
@@ -249,12 +275,39 @@ def test_missing_sdk_status_field_projects_not_ready_and_locks_actions(monkeypat
         capture.subscriptions["/direct_sdk/joint_cmd_left"].callback(_joint_message([0.0] * 7))
 
 
+def test_missing_status_field_preserves_available_real_fault_fields(monkeypatch):
+    node, capture = make_fake_adapter(monkeypatch)
+    left = node.left_arm.controller
+    left.controller.status = SimpleNamespace(ctrl_mode=1, arm_status=9, motion_status=4, err_code=64)
+
+    node._on_timer()
+
+    status = capture.publishers["/direct_sdk/arm_status_left"].messages[-1]
+    assert status.ctrl_mode == 0
+    assert status.arm_status == 9
+    assert status.mode_feedback == 0
+    assert status.motion_status == 4
+    assert status.err_code == 64
+    assert node.left_arm.locked_reason == "missing SDK status field mode_feed"
+
+
 def test_shutdown_disables_and_disconnects_both_arms(monkeypatch):
     node, capture = make_fake_adapter(monkeypatch)
 
     errors = node.shutdown()
 
     assert errors == []
+    assert all(controller.disable_calls == [7] for controller in capture.controllers)
+    assert all(controller.disconnect_calls == [True] for controller in capture.controllers)
+    assert capture.timers[0].cancel_calls == 1
+
+
+def test_shutdown_is_idempotent(monkeypatch):
+    node, capture = make_fake_adapter(monkeypatch)
+
+    assert node.shutdown() == []
+    assert node.shutdown() == []
+
     assert all(controller.disable_calls == [7] for controller in capture.controllers)
     assert all(controller.disconnect_calls == [True] for controller in capture.controllers)
     assert capture.timers[0].cancel_calls == 1
@@ -271,3 +324,37 @@ def test_shutdown_reports_cleanup_failure_after_attempting_both_arms(monkeypatch
     assert capture.controllers[1].disable_calls == [7]
     assert capture.controllers[0].disconnect_calls == [True]
     assert capture.controllers[1].disconnect_calls == []
+
+
+def test_second_arm_setup_failure_cleans_first_setup_arm_and_shuts_down_rclpy(monkeypatch):
+    FakeController.setup_failures = {"right": RuntimeError("right setup failed")}
+    shutdown_calls = []
+    monkeypatch.setattr(adapter, "_load_piper_controller", lambda: FakeController)
+    monkeypatch.setattr(adapter.rclpy, "init", lambda args=None: None)
+    monkeypatch.setattr(adapter.rclpy, "shutdown", lambda: shutdown_calls.append(True))
+    monkeypatch.setattr(adapter.rclpy, "spin", lambda node: None)
+    monkeypatch.setattr(adapter.Node, "__init__", lambda self, *_args, **_kwargs: None)
+
+    assert adapter.main(["--left-can", "can_left", "--right-can", "can_right", "--allow-enable"]) == 1
+
+    assert FakeController.instances[0].name == "left"
+    assert FakeController.instances[0].disable_calls == [7]
+    assert FakeController.instances[0].disconnect_calls == [True]
+    assert shutdown_calls == [True]
+
+
+def test_ros_entity_construction_failure_cleans_setup_arms_and_shuts_down_rclpy(monkeypatch):
+    shutdown_calls = []
+    monkeypatch.setattr(adapter, "_load_piper_controller", lambda: FakeController)
+    monkeypatch.setattr(adapter.rclpy, "init", lambda args=None: None)
+    monkeypatch.setattr(adapter.rclpy, "shutdown", lambda: shutdown_calls.append(True))
+    monkeypatch.setattr(adapter.rclpy, "spin", lambda node: None)
+    monkeypatch.setattr(adapter.Node, "__init__", lambda self, *_args, **_kwargs: None)
+    monkeypatch.setattr(PiperDirectSdkAdapter, "create_publisher", lambda self, *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("publisher construction failed")))
+
+    assert adapter.main(["--left-can", "can_left", "--right-can", "can_right", "--allow-enable"]) == 1
+
+    assert [controller.name for controller in FakeController.instances] == ["left", "right"]
+    assert all(controller.disable_calls == [7] for controller in FakeController.instances)
+    assert all(controller.disconnect_calls == [True] for controller in FakeController.instances)
+    assert shutdown_calls == [True]

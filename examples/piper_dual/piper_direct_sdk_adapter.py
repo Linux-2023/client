@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import numbers
 import signal
 import sys
 from collections.abc import Sequence
@@ -30,7 +31,13 @@ def _load_piper_controller() -> type:
 def _validate_action(values: Sequence[float]) -> list[float]:
     if len(values) != 7:
         raise ValueError("direct SDK action must contain exactly seven values")
-    converted = [float(value) for value in values]
+    converted: list[float] = []
+    for index, value in enumerate(values):
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"direct SDK action value {index} must be a real numeric scalar")
+        if not isinstance(value, (numbers.Real, np.integer, np.floating)):
+            raise ValueError(f"direct SDK action value {index} must be a real numeric scalar")
+        converted.append(float(value))
     if not all(math.isfinite(value) for value in converted):
         raise ValueError("direct SDK action values must be finite")
     gripper = converted[6]
@@ -48,6 +55,7 @@ class DirectSdkArm:
         self._controller_factory = controller_factory
         self.controller: Any | None = None
         self.locked_reason: str | None = None
+        self._shutdown_complete = False
 
     def setup(self) -> None:
         self.controller = self._controller_factory(self.name)
@@ -76,17 +84,29 @@ class DirectSdkArm:
     def read_status(self) -> tuple[dict[str, int], str | None]:
         controller = self._require_controller()
         raw = getattr(controller, "controller", None)
+        fields = {field: 0 for field in STATUS_FIELDS}
         if raw is None:
-            return {field: 0 for field in STATUS_FIELDS}, self._lock("missing raw SDK controller")
+            return fields, self._lock("missing raw SDK controller")
         try:
             status_holder = raw.GetArmStatus()
             status = status_holder.arm_status
-            fields = {field: int(getattr(status, field)) for field in STATUS_FIELDS}
         except Exception as exc:  # noqa: BLE001 - status projection must surface SDK shape problems.
-            fields = {field: 0 for field in STATUS_FIELDS}
-            return fields, self._lock(f"missing SDK status field: {exc}")
+            return fields, self._lock(f"missing SDK status object: {exc}")
+        missing_fields: list[str] = []
+        for field in STATUS_FIELDS:
+            try:
+                fields[field] = int(getattr(status, field))
+            except AttributeError:
+                missing_fields.append(field)
+            except Exception as exc:  # noqa: BLE001 - malformed fields are unsafe status data.
+                missing_fields.append(f"{field}: {exc}")
+        if missing_fields:
+            fields["ctrl_mode"] = 0
+            if len(missing_fields) == 1:
+                return fields, self._lock(f"missing SDK status field {missing_fields[0]}")
+            return fields, self._lock(f"missing SDK status fields {', '.join(missing_fields)}")
         try:
-            enabled = tuple(bool(value) for value in raw.GetArmEnableStatus())
+            enabled = tuple(raw.GetArmEnableStatus())
         except Exception as exc:  # noqa: BLE001 - status projection must surface SDK shape problems.
             fields["ctrl_mode"] = 0
             return fields, self._lock(f"missing SDK enable status: {exc}")
@@ -94,12 +114,15 @@ class DirectSdkArm:
             fields["ctrl_mode"] = 0
             return fields, self._lock(f"expected six driver enable flags, got {len(enabled)}")
         for index, is_enabled in enumerate(enabled, start=1):
-            if not is_enabled:
+            if not bool(is_enabled):
                 fields["ctrl_mode"] = 0
                 return fields, self._lock(f"driver {index} disabled")
         return fields, None
 
     def shutdown(self) -> list[str]:
+        if self._shutdown_complete:
+            return []
+        self._shutdown_complete = True
         errors: list[str] = []
         if self.controller is None:
             return errors
@@ -140,27 +163,33 @@ class PiperDirectSdkAdapter(Node):
         self.right_arm = right_arm
         self._arms = {"left": left_arm, "right": right_arm}
         self._shutting_down = False
-        if setup_arms:
-            self.left_arm.setup()
-            self.right_arm.setup()
-        self._feedback_publishers = {
-            "left": self.create_publisher(JointState, "/direct_sdk/joint_left", 10),
-            "right": self.create_publisher(JointState, "/direct_sdk/joint_right", 10),
-        }
-        self._command_publishers = {
-            "left": self.create_publisher(JointState, "/direct_sdk/joint_ctrl_left", 10),
-            "right": self.create_publisher(JointState, "/direct_sdk/joint_ctrl_right", 10),
-        }
-        self._status_publishers = {
-            "left": self.create_publisher(PiperStatusMsg, "/direct_sdk/arm_status_left", 10),
-            "right": self.create_publisher(PiperStatusMsg, "/direct_sdk/arm_status_right", 10),
-        }
-        self._subscriptions = [
-            self.create_subscription(JointState, "/direct_sdk/joint_cmd_left", self._make_action_callback("left"), 10),
-            self.create_subscription(JointState, "/direct_sdk/joint_cmd_right", self._make_action_callback("right"), 10),
-        ]
-        self._last_command_echo: dict[str, list[float] | None] = {"left": None, "right": None}
-        self._timer = self.create_timer(0.05, self._on_timer)
+        self._shutdown_complete = False
+        self._timer = None
+        try:
+            if setup_arms:
+                self.left_arm.setup()
+                self.right_arm.setup()
+            self._feedback_publishers = {
+                "left": self.create_publisher(JointState, "/direct_sdk/joint_left", 10),
+                "right": self.create_publisher(JointState, "/direct_sdk/joint_right", 10),
+            }
+            self._command_publishers = {
+                "left": self.create_publisher(JointState, "/direct_sdk/joint_ctrl_left", 10),
+                "right": self.create_publisher(JointState, "/direct_sdk/joint_ctrl_right", 10),
+            }
+            self._status_publishers = {
+                "left": self.create_publisher(PiperStatusMsg, "/direct_sdk/arm_status_left", 10),
+                "right": self.create_publisher(PiperStatusMsg, "/direct_sdk/arm_status_right", 10),
+            }
+            self._subscriptions = [
+                self.create_subscription(JointState, "/direct_sdk/joint_cmd_left", self._make_action_callback("left"), 10),
+                self.create_subscription(JointState, "/direct_sdk/joint_cmd_right", self._make_action_callback("right"), 10),
+            ]
+            self._last_command_echo: dict[str, list[float] | None] = {"left": None, "right": None}
+            self._timer = self.create_timer(0.05, self._on_timer)
+        except Exception:
+            self.shutdown()
+            raise
 
     @property
     def controllers(self) -> list[Any]:
@@ -220,6 +249,9 @@ class PiperDirectSdkAdapter(Node):
             self.get_logger().warning(f"{side} direct SDK actions locked: {reason}")
 
     def shutdown(self) -> list[str]:
+        if getattr(self, "_shutdown_complete", False):
+            return []
+        self._shutdown_complete = True
         self._shutting_down = True
         timer = getattr(self, "_timer", None)
         if timer is not None and hasattr(timer, "cancel"):
@@ -244,31 +276,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("--allow-enable is required before loading PiperController", file=sys.stderr)
         return 2
     controller_type = _load_piper_controller()
-    rclpy.init(args=None)
-    node = PiperDirectSdkAdapter(
-        left_arm=DirectSdkArm("left", args.left_can, controller_factory=controller_type),
-        right_arm=DirectSdkArm("right", args.right_can, controller_factory=controller_type),
-    )
+    left_arm = DirectSdkArm("left", args.left_can, controller_factory=controller_type)
+    right_arm = DirectSdkArm("right", args.right_can, controller_factory=controller_type)
+    node: PiperDirectSdkAdapter | None = None
     shutdown_errors: list[str] = []
+    exit_code = 0
+    rclpy_initialized = False
+    old_sigint = None
+    old_sigterm = None
 
     def _handle_signal(_signum, _frame) -> None:
         raise KeyboardInterrupt
 
-    old_sigint = signal.signal(signal.SIGINT, _handle_signal)
-    old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+        rclpy.init(args=None)
+        rclpy_initialized = True
+        node = PiperDirectSdkAdapter(left_arm=left_arm, right_arm=right_arm)
+        old_sigint = signal.signal(signal.SIGINT, _handle_signal)
+        old_sigterm = signal.signal(signal.SIGTERM, _handle_signal)
+        try:
+            rclpy.spin(node)
+        except KeyboardInterrupt:
+            pass
+    except Exception as exc:  # noqa: BLE001 - startup failures must clean up and return nonzero.
+        print(exc, file=sys.stderr)
+        exit_code = 1
     finally:
-        signal.signal(signal.SIGINT, old_sigint)
-        signal.signal(signal.SIGTERM, old_sigterm)
-        shutdown_errors = node.shutdown()
-        node.destroy_node()
-        rclpy.shutdown()
+        if old_sigint is not None:
+            signal.signal(signal.SIGINT, old_sigint)
+        if old_sigterm is not None:
+            signal.signal(signal.SIGTERM, old_sigterm)
+        if node is not None:
+            shutdown_errors = node.shutdown()
+            node.destroy_node()
+        else:
+            shutdown_errors = left_arm.shutdown() + right_arm.shutdown()
+        if rclpy_initialized:
+            rclpy.shutdown()
     for error in shutdown_errors:
         print(error, file=sys.stderr)
-    return 1 if shutdown_errors else 0
+    return 1 if shutdown_errors or exit_code else 0
 
 
 if __name__ == "__main__":
