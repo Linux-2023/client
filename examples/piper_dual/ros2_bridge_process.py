@@ -362,7 +362,12 @@ class PiperRos2Bridge(Node):
             raise RuntimeError(f"Action publishing permanently disabled: {self._action_publishing_disabled_reason}")
         try:
             if validate_graph:
-                validate_profile_graph(self, self._profile, self._contract)
+                validate_profile_graph(
+                    self,
+                    self._profile,
+                    self._contract,
+                    tuple(topic for _arm, topic in self._endpoint_plan.action_publishers),
+                )
             self._assert_live_joint_ready()
             if self._action_publishers:
                 return

@@ -143,7 +143,12 @@ class EndpointPlan:
         )
 
 
-def validate_profile_graph(node: Any, profile: ControlStackProfile, contract: BridgeContract) -> None:
+def validate_profile_graph(
+    node: Any,
+    profile: ControlStackProfile,
+    contract: BridgeContract,
+    action_topics: tuple[str, ...] | None = None,
+) -> None:
     """Validate that the live ROS graph matches the selected control stack contract."""
     actual = {name: tuple(types) for name, types in node.get_topic_names_and_types()}
 
@@ -168,7 +173,8 @@ def validate_profile_graph(node: Any, profile: ControlStackProfile, contract: Br
         if not any(profile.direct_adapter_node in name for name in node_names):
             raise ValueError(f"control stack {profile.stack_id} missing required node {profile.direct_adapter_node}")
 
-    for topic in contract.joint_action_topics.values():
+    selected_action_topics = action_topics if action_topics is not None else tuple(contract.joint_action_topics.values())
+    for topic in selected_action_topics:
         subscriber_count = int(node.count_subscribers(topic))
         if subscriber_count != 1:
             raise ValueError(

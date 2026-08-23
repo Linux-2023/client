@@ -66,3 +66,20 @@
 - Applies the same selected-profile graph/status guard to EEF live publisher creation.
 - Counts subscribers on the selected contract action topics actually published.
 - Added `control_stack` to `Ros2DualEnvironment` and forwards it to `Ros2BackendClient`.
+
+## EEF selected-action-topic fix follow-up
+
+### RED
+- `/usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_ros2_bridge_codec.py::test_bridge_eef_graph_uses_eef_action_subscribers_not_joint_subscribers examples/piper_dual/tests/test_ros2_bridge_codec.py::test_bridge_eef_live_action_publishes_after_eef_action_subscribers_pass`
+  - Output: `2 failed in 0.36s`.
+  - Failures: EEF graph guard did not reject when only joint action topics had subscribers; EEF success case incorrectly checked joint action subscribers and failed with `/joint_ctrl_cmd_left` having zero subscribers.
+
+### GREEN
+- `/usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_ros2_bridge_codec.py::test_bridge_eef_graph_uses_eef_action_subscribers_not_joint_subscribers examples/piper_dual/tests/test_ros2_bridge_codec.py::test_bridge_eef_live_action_publishes_after_eef_action_subscribers_pass`
+  - Output: `2 passed in 0.29s`.
+- `/usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_ros2_contract.py examples/piper_dual/tests/test_ros2_bridge_codec.py`
+  - Output: `41 passed in 0.41s`.
+
+### Fix notes
+- `validate_profile_graph` accepts explicit selected action topics.
+- `PiperRos2Bridge` passes `EndpointPlan.action_publishers` topics, so joint and EEF modes validate subscriber counts for the topics actually published.

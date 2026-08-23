@@ -340,6 +340,43 @@ def test_bridge_eef_live_publishers_require_profile_graph_and_status_ready(monke
     assert calls["publishers"] == []
     assert calls["published"] == []
 
+
+def test_bridge_eef_graph_uses_eef_action_subscribers_not_joint_subscribers(monkeypatch):
+    node, contract, calls = _construct_test_bridge(
+        monkeypatch,
+        dry_run=False,
+        publish_actions=True,
+        eef_control=True,
+    )
+    node.count_subscribers = lambda topic: 1 if topic in contract.joint_action_topics.values() else 0
+    _mark_status_ready(node)
+
+    with pytest.raises(RuntimeError, match="exactly one external subscriber"):
+        node._handle_request({"type": "publish_eef_action", "left": [0.0] * 7, "right": [0.0] * 7})
+    assert calls["publishers"] == []
+    assert calls["published"] == []
+
+
+def test_bridge_eef_live_action_publishes_after_eef_action_subscribers_pass(monkeypatch):
+    node, contract, calls = _construct_test_bridge(
+        monkeypatch,
+        dry_run=False,
+        publish_actions=True,
+        eef_control=True,
+    )
+    _mark_status_ready(node)
+
+    node._handle_request({"type": "publish_eef_action", "left": [0.0] * 7, "right": [0.0] * 7})
+
+    assert calls["publishers"] == [
+        ("PosCmd", contract.eef_action_topics["left"], 1),
+        ("PosCmd", contract.eef_action_topics["right"], 1),
+    ]
+    assert [topic for topic, _message in calls["published"]] == [
+        contract.eef_action_topics["left"],
+        contract.eef_action_topics["right"],
+    ]
+
 def test_bridge_constructor_rejects_config_identity_mismatch(monkeypatch):
     from ros2_bridge_process import LockedJsonLineWriter
     from ros2_bridge_process import PiperRos2Bridge
