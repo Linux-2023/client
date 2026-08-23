@@ -1,4 +1,4 @@
-control_stack_id: official-ros
+control_stack_id: direct-sdk
 schema_version: piper_dual_ros2_v1
 max_sync_error_ms: 30
 jpeg_quality: 90
@@ -70,3 +70,32 @@ action:
     - rad
     - rad
     - m
+bridge_contract:
+  joint_topics:
+    /direct_sdk/joint_left: puppet_left
+    /direct_sdk/joint_right: puppet_right
+    /direct_sdk/joint_ctrl_left: master_left
+    /direct_sdk/joint_ctrl_right: master_right
+  joint_action_topics:
+    left: /direct_sdk/joint_cmd_left
+    right: /direct_sdk/joint_cmd_right
+  eef_topics: {}
+  eef_action_topics:
+    left: /pos_left_cmd
+    right: /pos_right_cmd
+  status_topics:
+    left: /direct_sdk/arm_status_left
+    right: /direct_sdk/arm_status_right
+  joint_names:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - gripper
+  control:
+    speed_percent: 100
+    gripper_effort: 0.5
+    max_action_delta: 0.05
+    status_watchdog_s: 0.5

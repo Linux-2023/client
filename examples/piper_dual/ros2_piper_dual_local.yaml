@@ -1,4 +1,4 @@
-control_stack_id: official-ros
+control_stack_id: local-ros
 schema_version: piper_dual_ros2_v1
 max_sync_error_ms: 30
 jpeg_quality: 90
@@ -70,3 +70,34 @@ action:
     - rad
     - rad
     - m
+bridge_contract:
+  joint_topics:
+    /puppet/joint_left: puppet_left
+    /puppet/joint_right: puppet_right
+    /master/joint_left: master_left
+    /master/joint_right: master_right
+  joint_action_topics:
+    left: /joint_left_states
+    right: /joint_right_states
+  eef_topics:
+    left: /puppet/end_pose_left
+    right: /puppet/end_pose_right
+  eef_action_topics:
+    left: /pos_left_cmd
+    right: /pos_right_cmd
+  status_topics:
+    left: /piper_left_ctrl_node/arm_status
+    right: /piper_right_ctrl_node/arm_status
+  joint_names:
+    - joint0
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+  control:
+    speed_percent: 30
+    gripper_effort: 0.5
+    max_action_delta: 0.05
+    status_watchdog_s: 0.5
