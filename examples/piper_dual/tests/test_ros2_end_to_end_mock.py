@@ -29,6 +29,11 @@ from ros2_backend import Ros2BackendClient
 from streaming_hdf5 import SCHEMA_VERSION
 from streaming_hdf5 import StreamingEpisodeWriter
 from streaming_hdf5 import validate_episode
+from ros2_contract import BridgeContract
+from ros2_contract import EndpointPlan
+from control_stack import load_profile_config
+from control_stack import profile_for
+
 
 CAMERA_COLORS: dict[str, tuple[int, int, int]] = {
     "cam_high": (250, 30, 20),
@@ -342,3 +347,69 @@ def test_interrupted_finalization_aborts_partial_and_does_not_publish_final_outp
 
     assert not (tmp_path / "episode_000000.hdf5").exists()
     assert not (tmp_path / "episode_000000.hdf5.partial").exists()
+
+
+STACK_IDS = ("local-ros", "official-ros", "direct-sdk")
+EXPECTED_JOINT_TOPIC_ALIASES = {
+    "local-ros": {
+        "/puppet/joint_left": "puppet_left",
+        "/puppet/joint_right": "puppet_right",
+        "/master/joint_left": "master_left",
+        "/master/joint_right": "master_right",
+    },
+    "official-ros": {
+        "/joint_left": "puppet_left",
+        "/joint_right": "puppet_right",
+        "/joint_states_ctrl_left": "master_left",
+        "/joint_states_ctrl_right": "master_right",
+    },
+    "direct-sdk": {
+        "/direct_sdk/joint_left": "puppet_left",
+        "/direct_sdk/joint_right": "puppet_right",
+        "/direct_sdk/joint_ctrl_left": "master_left",
+        "/direct_sdk/joint_ctrl_right": "master_right",
+    },
+}
+
+
+def _ten_offset_frame_events() -> list[dict[str, object]]:
+    offsets = {sensor: index * 0.001 for index, sensor in enumerate(SENSOR_ORDER)}
+    events: list[dict[str, object]] = []
+    for frame_index in range(10):
+        reference = 80.0 + frame_index * 0.1
+        events.extend(_sensor_event(sensor, reference + offsets[sensor], frame_index) for sensor in SENSOR_ORDER)
+    return events
+
+
+@pytest.mark.parametrize("stack_id", STACK_IDS)
+def test_profile_yaml_mock_flow_normalizes_ten_in_process_backend_frames(stack_id: str) -> None:
+    _profile, config = load_profile_config(stack_id, profile_for(stack_id).config_path)
+    contract = BridgeContract.from_mapping(config)
+    endpoint_plan = EndpointPlan.for_mode(
+        contract,
+        dry_run=True,
+        publish_actions=True,
+        eef_control=False,
+        include_eef=False,
+    )
+    backend = InProcessBridgeBackend(_ten_offset_frame_events(), max_sync_error=0.03)
+    backend.start()
+
+    frames = [backend.next_frame(timeout=0.1) for _ in range(10)]
+    states = np.stack([frame.state for frame in frames])
+    actions = np.stack([frame.action for frame in frames])
+
+    assert contract.image_topics == {
+        "cam_high": "/camera_f_l/color/image_raw",
+        "cam_left_wrist": "/camera_l/color/image_raw",
+        "cam_right_wrist": "/camera_r/color/image_raw",
+    }
+    assert contract.joint_topics == EXPECTED_JOINT_TOPIC_ALIASES[stack_id]
+    assert tuple(contract.image_topics) + tuple(contract.joint_topics.values()) == SENSOR_ORDER
+    assert endpoint_plan.action_publishers == ()
+    assert states.shape == (10, FRAME_DIMENSION)
+    assert actions.shape == (10, FRAME_DIMENSION)
+    assert [frame.timestamp for frame in frames] == pytest.approx([80.0 + index * 0.1 for index in range(10)])
+    assert all(tuple(frame.sensor_timestamps) == SENSOR_ORDER for frame in frames)
+    assert max(abs(value) for frame in frames for value in frame.sync_error.values()) <= 0.03
+    assert backend.synchronizer.accepted_frames == 10

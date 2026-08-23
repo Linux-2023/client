@@ -14,9 +14,16 @@ from control_stack import profile_for
 from ros2_contract import BridgeContract
 from ros2_contract import EndpointPlan
 from ros2_contract import validate_profile_graph
+from test_ros2_bridge_codec import _construct_test_bridge
+
 
 STACK_IDS = ("local-ros", "official-ros", "direct-sdk")
 EXPECTED_SPEED = {"local-ros": 30, "official-ros": 30, "direct-sdk": 100}
+EXPECTED_JOINT_NAMES = {
+    "local-ros": ("joint0", "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"),
+    "official-ros": ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"),
+    "direct-sdk": ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "gripper"),
+}
 EXPECTED_ACTION_TOPICS = {
     "local-ros": ("/joint_left_states", "/joint_right_states"),
     "official-ros": ("/joint_ctrl_cmd_left", "/joint_ctrl_cmd_right"),
@@ -70,48 +77,6 @@ class _FakeGraphNode:
         return list(self._node_names)
 
 
-class _FakeBridgeNode:
-    def __init__(self, contract: BridgeContract, *, dry_run: bool, publish_actions: bool) -> None:
-        self.contract = contract
-        self.publishers: list[tuple[str, str]] = []
-        self.published: list[dict[str, object]] = []
-        self.status_messages: list[dict[str, object]] = []
-        self._ready = False
-        self._publish_actions = publish_actions and not dry_run
-        self._topics = _complete_topic_types(contract)
-
-    def mark_ready(self) -> None:
-        self._ready = True
-
-    def get_topic_names_and_types(self):
-        return [(topic, list(types)) for topic, types in self._topics.items()]
-
-    def count_subscribers(self, topic: str) -> int:
-        return 1 if topic in self.contract.joint_action_topics.values() else 0
-
-    def get_node_names(self):
-        return []
-
-    def _handle_request(self, request: dict[str, object]) -> None:
-        if not self._ready:
-            raise RuntimeError("status not ready")
-        if request.get("type") != "publish_action":
-            raise ValueError("unsupported request")
-        if self._publish_actions:
-            self.publishers = [
-                ("JointState", self.contract.joint_action_topics["left"]),
-                ("JointState", self.contract.joint_action_topics["right"]),
-            ]
-            self.published.append(request)
-            self.status_messages.append({"type": "status", "state": "action_published"})
-        else:
-            self.status_messages.append(
-                {
-                    "type": "status",
-                    "state": "action_ignored",
-                    "metadata": {"dry_run": True, "publish_actions": False},
-                }
-            )
 
 
 def test_profiles_have_exact_three_stack_contracts_speed_and_action_topics() -> None:
@@ -121,6 +86,7 @@ def test_profiles_have_exact_three_stack_contracts_speed_and_action_topics() -> 
 
         assert profile.stack_id == stack_id
         assert contract.control.speed_percent == EXPECTED_SPEED[stack_id]
+        assert contract.joint_names == EXPECTED_JOINT_NAMES[stack_id]
         assert profile.action_topics == EXPECTED_ACTION_TOPICS[stack_id]
         assert contract.image_topics == {
             "cam_high": "/camera_f_l/color/image_raw",
@@ -147,19 +113,22 @@ def test_profiles_have_exact_three_stack_contracts_speed_and_action_topics() -> 
 
 
 @pytest.mark.parametrize("stack_id", STACK_IDS)
-def test_dry_run_bridge_constructs_zero_publishers_and_ignores_valid_action(stack_id: str) -> None:
-    profile, mapping = load_profile_config(stack_id, profile_for(stack_id).config_path)
-    contract = BridgeContract.from_mapping(mapping)
-    node = _FakeBridgeNode(contract, dry_run=True, publish_actions=True)
+def test_dry_run_bridge_constructs_real_node_zero_publishers_and_ignores_valid_action(monkeypatch, stack_id: str) -> None:
+    profile = profile_for(stack_id)
+    node, contract, calls = _construct_test_bridge(
+        monkeypatch,
+        dry_run=True,
+        publish_actions=True,
+        control_stack=stack_id,
+    )
 
-    node.mark_ready()
-    assert node.publishers == []
+    assert calls["publishers"] == []
 
     node._handle_request({"type": "publish_action", "left": [0.0] * 7, "right": [0.0] * 7})
 
-    assert node.publishers == []
-    assert node.published == []
-    assert node.status_messages == [
+    assert calls["publishers"] == []
+    assert calls["published"] == []
+    assert [message for message in calls["status"] if message.get("state") == "action_ignored"] == [
         {
             "type": "status",
             "state": "action_ignored",
@@ -173,55 +142,89 @@ def test_dry_run_bridge_constructs_zero_publishers_and_ignores_valid_action(stac
 
 
 @pytest.mark.parametrize("stack_id", STACK_IDS)
-def test_profile_graph_guards_joint_and_eef_action_types_and_conflicts(stack_id: str) -> None:
+def test_profile_graph_guards_required_forbidden_action_types_subscribers_and_direct_adapter(stack_id: str) -> None:
     profile, mapping = load_profile_config(stack_id, profile_for(stack_id).config_path)
     contract = BridgeContract.from_mapping(mapping)
     topics = _complete_topic_types(contract)
+    node_names = [profile.direct_adapter_node] if profile.direct_adapter_node is not None else []
     joint_action_counts = {topic: 1 for topic in contract.joint_action_topics.values()}
     eef_action_counts = {topic: 1 for topic in contract.eef_action_topics.values()}
 
-    node = _FakeGraphNode(
-        topics=topics,
-        subscriber_counts=joint_action_counts,
-        node_names=["piper_direct_sdk_adapter"] if stack_id == "direct-sdk" else [],
+    validate_profile_graph(
+        _FakeGraphNode(topics=topics, subscriber_counts=joint_action_counts, node_names=node_names),
+        profile,
+        contract,
+        selected_action_types={topic: "sensor_msgs/msg/JointState" for topic in contract.joint_action_topics.values()},
     )
-    validate_profile_graph(node, profile, contract)
 
-    joint_conflict = dict(topics)
-    first_joint_action_topic = contract.joint_action_topics["left"]
-    joint_conflict[first_joint_action_topic] = ["std_msgs/msg/Bool"]
-    joint_node = _FakeGraphNode(
-        topics=joint_conflict,
-        subscriber_counts=joint_action_counts,
-        node_names=["piper_direct_sdk_adapter"] if stack_id == "direct-sdk" else [],
-    )
-    with pytest.raises(ValueError, match="joint action.*sensor_msgs/msg/JointState"):
-        validate_profile_graph(joint_node, profile, contract)
-
-    if contract.eef_topics:
-        eef_node = _FakeGraphNode(
-            topics=topics,
-            subscriber_counts=eef_action_counts,
-            node_names=["piper_direct_sdk_adapter"] if stack_id == "direct-sdk" else [],
-        )
+    missing_required = dict(topics)
+    missing_required.pop(profile.required_topics[0])
+    with pytest.raises(ValueError, match="missing required topic"):
         validate_profile_graph(
-            eef_node,
+            _FakeGraphNode(topics=missing_required, subscriber_counts=joint_action_counts, node_names=node_names),
+            profile,
+            contract,
+        )
+
+    forbidden_present = dict(topics)
+    forbidden_present[profile.forbidden_topics[0]] = ["sensor_msgs/msg/JointState"]
+    with pytest.raises(ValueError, match="found forbidden topic"):
+        validate_profile_graph(
+            _FakeGraphNode(topics=forbidden_present, subscriber_counts=joint_action_counts, node_names=node_names),
+            profile,
+            contract,
+        )
+
+    bad_joint_type = dict(topics)
+    bad_joint_type[contract.joint_action_topics["left"]] = ["std_msgs/msg/Bool"]
+    with pytest.raises(ValueError, match="joint action.*sensor_msgs/msg/JointState"):
+        validate_profile_graph(
+            _FakeGraphNode(topics=bad_joint_type, subscriber_counts=joint_action_counts, node_names=node_names),
+            profile,
+            contract,
+        )
+
+    bad_joint_subscribers = dict(joint_action_counts)
+    bad_joint_subscribers[contract.joint_action_topics["left"]] = 2
+    with pytest.raises(ValueError, match="exactly one external subscriber; found 2"):
+        validate_profile_graph(
+            _FakeGraphNode(topics=topics, subscriber_counts=bad_joint_subscribers, node_names=node_names),
+            profile,
+            contract,
+        )
+
+    validate_profile_graph(
+        _FakeGraphNode(topics=topics, subscriber_counts=eef_action_counts, node_names=node_names),
+        profile,
+        contract,
+        selected_action_types={topic: "piper_msgs/msg/PosCmd" for topic in contract.eef_action_topics.values()},
+    )
+
+    first_eef_action_topic = next(iter(contract.eef_action_topics.values()))
+    bad_eef_type = dict(topics)
+    bad_eef_type[first_eef_action_topic] = ["sensor_msgs/msg/JointState"]
+    with pytest.raises(ValueError, match="action topic.*piper_msgs/msg/PosCmd"):
+        validate_profile_graph(
+            _FakeGraphNode(topics=bad_eef_type, subscriber_counts=eef_action_counts, node_names=node_names),
             profile,
             contract,
             selected_action_types={topic: "piper_msgs/msg/PosCmd" for topic in contract.eef_action_topics.values()},
         )
 
-        eef_conflict = dict(topics)
-        eef_conflict[next(iter(contract.eef_action_topics.values()))] = ["sensor_msgs/msg/JointState"]
-        bad_eef_node = _FakeGraphNode(
-            topics=eef_conflict,
-            subscriber_counts=eef_action_counts,
-            node_names=["piper_direct_sdk_adapter"] if stack_id == "direct-sdk" else [],
+    bad_eef_subscribers = dict(eef_action_counts)
+    bad_eef_subscribers[first_eef_action_topic] = 0
+    with pytest.raises(ValueError, match="exactly one external subscriber; found 0"):
+        validate_profile_graph(
+            _FakeGraphNode(topics=topics, subscriber_counts=bad_eef_subscribers, node_names=node_names),
+            profile,
+            contract,
+            selected_action_types={topic: "piper_msgs/msg/PosCmd" for topic in contract.eef_action_topics.values()},
         )
-        with pytest.raises(ValueError, match="action topic.*piper_msgs/msg/PosCmd"):
+
+    if profile.direct_adapter_node is not None:
+        with pytest.raises(ValueError, match="missing required node"):
             validate_profile_graph(
-                bad_eef_node,
+                _FakeGraphNode(topics=topics, subscriber_counts=joint_action_counts, node_names=[]),
                 profile,
                 contract,
-                selected_action_types={topic: "piper_msgs/msg/PosCmd" for topic in contract.eef_action_topics.values()},
             )
