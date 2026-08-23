@@ -366,7 +366,7 @@ class PiperRos2Bridge(Node):
                     self,
                     self._profile,
                     self._contract,
-                    tuple(topic for _arm, topic in self._endpoint_plan.action_publishers),
+                    {topic: ("piper_msgs/msg/PosCmd" if self._eef_control else "sensor_msgs/msg/JointState") for _arm, topic in self._endpoint_plan.action_publishers},
                 )
             self._assert_live_joint_ready()
             if self._action_publishers:

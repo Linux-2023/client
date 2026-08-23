@@ -147,7 +147,7 @@ def validate_profile_graph(
     node: Any,
     profile: ControlStackProfile,
     contract: BridgeContract,
-    action_topics: tuple[str, ...] | None = None,
+    selected_action_types: Mapping[str, str] | None = None,
 ) -> None:
     """Validate that the live ROS graph matches the selected control stack contract."""
     actual = {name: tuple(types) for name, types in node.get_topic_names_and_types()}
@@ -173,8 +173,10 @@ def validate_profile_graph(
         if not any(profile.direct_adapter_node in name for name in node_names):
             raise ValueError(f"control stack {profile.stack_id} missing required node {profile.direct_adapter_node}")
 
-    selected_action_topics = action_topics if action_topics is not None else tuple(contract.joint_action_topics.values())
-    for topic in selected_action_topics:
+    if selected_action_types is None:
+        selected_action_types = {topic: "sensor_msgs/msg/JointState" for topic in contract.joint_action_topics.values()}
+    for topic, expected_action_type in selected_action_types.items():
+        _require_topic_type(actual, topic, expected_action_type, "action")
         subscriber_count = int(node.count_subscribers(topic))
         if subscriber_count != 1:
             raise ValueError(

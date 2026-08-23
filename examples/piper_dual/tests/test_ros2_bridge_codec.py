@@ -357,6 +357,25 @@ def test_bridge_eef_graph_uses_eef_action_subscribers_not_joint_subscribers(monk
     assert calls["published"] == []
 
 
+def test_bridge_eef_graph_rejects_selected_action_topic_wrong_type_before_publishers(monkeypatch):
+    node, contract, calls = _construct_test_bridge(
+        monkeypatch,
+        dry_run=False,
+        publish_actions=True,
+        eef_control=True,
+    )
+    topics = _complete_topic_types(contract)
+    topics[contract.eef_action_topics["left"]] = ["sensor_msgs/msg/JointState"]
+    topics[contract.eef_action_topics["right"]] = ["sensor_msgs/msg/JointState"]
+    node.get_topic_names_and_types = lambda: [(topic, list(types)) for topic, types in topics.items()]
+    _mark_status_ready(node)
+
+    with pytest.raises(RuntimeError, match="piper_msgs/msg/PosCmd"):
+        node._handle_request({"type": "publish_eef_action", "left": [0.0] * 7, "right": [0.0] * 7})
+    assert calls["publishers"] == []
+    assert calls["published"] == []
+
+
 def test_bridge_eef_live_action_publishes_after_eef_action_subscribers_pass(monkeypatch):
     node, contract, calls = _construct_test_bridge(
         monkeypatch,

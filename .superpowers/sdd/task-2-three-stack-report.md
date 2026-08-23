@@ -83,3 +83,20 @@
 ### Fix notes
 - `validate_profile_graph` accepts explicit selected action topics.
 - `PiperRos2Bridge` passes `EndpointPlan.action_publishers` topics, so joint and EEF modes validate subscriber counts for the topics actually published.
+
+## Selected action type fix follow-up
+
+### RED
+- `/usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_ros2_bridge_codec.py::test_bridge_eef_graph_rejects_selected_action_topic_wrong_type_before_publishers examples/piper_dual/tests/test_ros2_bridge_codec.py::test_bridge_eef_live_action_publishes_after_eef_action_subscribers_pass`
+  - Output: `1 failed, 1 passed in 0.32s`.
+  - Failure: EEF selected action topics with `sensor_msgs/msg/JointState` type and exactly one subscriber were not rejected before publisher creation.
+
+### GREEN
+- `/usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_ros2_bridge_codec.py::test_bridge_eef_graph_rejects_selected_action_topic_wrong_type_before_publishers examples/piper_dual/tests/test_ros2_bridge_codec.py::test_bridge_eef_live_action_publishes_after_eef_action_subscribers_pass`
+  - Output: `2 passed in 0.29s`.
+- `/usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_ros2_contract.py examples/piper_dual/tests/test_ros2_bridge_codec.py`
+  - Output: `42 passed in 0.39s`.
+
+### Fix notes
+- `validate_profile_graph` validates selected action publisher topics against selected-mode ROS types before subscriber counts.
+- `PiperRos2Bridge` supplies `sensor_msgs/msg/JointState` for joint mode and `piper_msgs/msg/PosCmd` for EEF mode.
