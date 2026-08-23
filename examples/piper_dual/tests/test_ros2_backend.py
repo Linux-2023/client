@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ros2_backend
+from eef_action_adapter import EefActionAdapter
 from ros2_backend import Ros2BackendClient
 
 
@@ -94,8 +95,109 @@ def test_start_uses_specified_interpreter_config_and_safety_flags(tmp_path, monk
 
     lines = [json.loads(line) for line in records.read_text(encoding="utf-8").splitlines()]
     assert lines[0]["executable"] == sys.executable
-    assert lines[0]["argv"] == [str(bridge), "--config", str(config), "--dry-run"]
+    assert lines[0]["argv"] == [str(bridge), "--config", str(config), "--control-stack", "official-ros", "--dry-run"]
     assert {"stdin": {"type": "stop"}} in lines
+
+
+
+def test_bridge_backend_forwards_control_stack_to_sidecar(tmp_path, monkeypatch):
+    records = tmp_path / "stack-records.jsonl"
+    bridge = write_fake_bridge(
+        tmp_path,
+        f"""
+        pathlib.Path({str(records)!r}).write_text(json.dumps({{"argv": sys.argv}}) + "\\n", encoding="utf-8")
+        print(json.dumps({{"type": "status", "state": "ready"}}), flush=True)
+        for line in sys.stdin:
+            if json.loads(line).get("type") == "stop":
+                break
+        """,
+    )
+    monkeypatch.setattr(ros2_backend, "BRIDGE_SCRIPT", bridge)
+    client = Ros2BackendClient(
+        bridge_python=Path(sys.executable),
+        config=write_config(tmp_path),
+        control_stack="local-ros",
+        dry_run=True,
+    )
+
+    client.start()
+    client.close()
+
+    argv = json.loads(records.read_text(encoding="utf-8"))["argv"]
+    assert "--control-stack" in argv
+    assert argv[argv.index("--control-stack") + 1] == "local-ros"
+
+def test_start_passes_paired_eef_topics_and_enables_eef_synchronizer(tmp_path, monkeypatch):
+    records = tmp_path / "eef-records.jsonl"
+    bridge = write_fake_bridge(
+        tmp_path,
+        f"""
+        pathlib.Path({str(records)!r}).write_text(json.dumps({{"argv": sys.argv}}) + "\\n", encoding="utf-8")
+        print(json.dumps({{"type": "status", "state": "ready"}}), flush=True)
+        for line in sys.stdin:
+            if json.loads(line).get("type") == "stop":
+                break
+        """,
+    )
+    monkeypatch.setattr(ros2_backend, "BRIDGE_SCRIPT", bridge)
+    client = Ros2BackendClient(
+        bridge_python=Path(sys.executable),
+        config=write_config(tmp_path),
+        eef_left_topic="/custom/left_pose",
+        eef_right_topic="/custom/right_pose",
+    )
+
+    assert client.synchronizer.include_eef is True
+    client.start()
+    client.close()
+
+    argv = json.loads(records.read_text(encoding="utf-8"))["argv"]
+    assert argv[-4:] == [
+        "--eef-left-topic",
+        "/custom/left_pose",
+        "--eef-right-topic",
+        "/custom/right_pose",
+    ]
+
+
+def test_start_passes_eef_control_flag_and_uses_injected_action_adapter(tmp_path, monkeypatch):
+    records = tmp_path / "eef-control-records.jsonl"
+    bridge = write_fake_bridge(
+        tmp_path,
+        f"""
+        pathlib.Path({str(records)!r}).write_text(json.dumps({{"argv": sys.argv}}) + "\\n", encoding="utf-8")
+        print(json.dumps({{"type": "status", "state": "ready"}}), flush=True)
+        for line in sys.stdin:
+            if json.loads(line).get("type") == "stop":
+                break
+        """,
+    )
+    monkeypatch.setattr(ros2_backend, "BRIDGE_SCRIPT", bridge)
+    adapter = EefActionAdapter()
+    client = Ros2BackendClient(
+        bridge_python=Path(sys.executable),
+        config=write_config(tmp_path),
+        action_adapter=adapter,
+        eef_control=True,
+        eef_left_topic="/left_pose",
+        eef_right_topic="/right_pose",
+    )
+
+    assert client.action_adapter is adapter
+    client.start()
+    client.close()
+
+    argv = json.loads(records.read_text(encoding="utf-8"))["argv"]
+    assert "--eef-control" in argv
+
+
+def test_backend_requires_paired_eef_topics(tmp_path):
+    with pytest.raises(ValueError, match="provided together"):
+        Ros2BackendClient(
+            bridge_python=Path(sys.executable),
+            config=write_config(tmp_path),
+            eef_left_topic="/left-only",
+        )
 
 
 def test_start_rejects_unsafe_dry_run_publish_actions_combination(tmp_path):
@@ -155,6 +257,31 @@ def test_raw_joint_sensor_values_are_validated_before_numpy_coercion(tmp_path, v
 
     with pytest.raises(RuntimeError, match=match):
         client._handle_message({"type": "sensor", "sensor": "puppet_left", "timestamp": 1.0, "values": values})
+
+
+def test_raw_eef_sensor_values_require_six_finite_json_numbers(tmp_path):
+    client = Ros2BackendClient(
+        bridge_python=Path(sys.executable),
+        config=write_config(tmp_path),
+        eef_left_topic="/left",
+        eef_right_topic="/right",
+    )
+
+    client._handle_message({
+        "type": "sensor",
+        "sensor": "eef_puppet_left",
+        "timestamp": 1.0,
+        "values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+    })
+    assert client.synchronizer.buffered_counts["eef_puppet_left"] == 1
+
+    with pytest.raises(RuntimeError, match="exactly six"):
+        client._handle_message({
+            "type": "sensor",
+            "sensor": "eef_puppet_right",
+            "timestamp": 1.0,
+            "values": [0.0] * 7,
+        })
 
 
 def test_clear_buffers_drops_queued_frames_and_synchronizer_state(tmp_path, monkeypatch):

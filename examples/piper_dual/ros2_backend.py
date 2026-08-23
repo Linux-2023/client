@@ -17,7 +17,11 @@ from typing import Any
 import numpy as np
 
 from action_adapter import ActionAdapter
+from eef_action_adapter import EefActionAdapter
+from frame_synchronizer import EEF_DIMENSION
+from frame_synchronizer import EEF_SENSORS
 from frame_synchronizer import FrameSynchronizer
+from frame_synchronizer import JOINT_DIMENSION
 from frame_synchronizer import SynchronizedFrame
 from ros2_protocol import decode_message
 from ros2_protocol import encode_message
@@ -40,16 +44,45 @@ class _BackendError:
 class Ros2BackendClient:
     """Launch and supervise the ROS 2 bridge sidecar."""
 
-    def __init__(self, bridge_python: Path, config: Path, publish_actions: bool = False, dry_run: bool = True) -> None:
+    def __init__(
+        self,
+        bridge_python: Path,
+        config: Path,
+        publish_actions: bool = False,
+        dry_run: bool = True,
+        *,
+        eef_left_topic: str | None = None,
+        eef_right_topic: str | None = None,
+        action_adapter: Any | None = None,
+        eef_control: bool = False,
+        eef_left_action_topic: str = "/pos_left_cmd",
+        eef_right_action_topic: str = "/pos_right_cmd",
+        control_stack: str = "official-ros",
+    ) -> None:
+        if (eef_left_topic is None) != (eef_right_topic is None):
+            raise ValueError("EEF left and right topics must be provided together")
+        if eef_control and action_adapter is None:
+            action_adapter = EefActionAdapter()
         self.bridge_python = Path(bridge_python)
         self.config = Path(config)
+        self.control_stack = str(control_stack)
         self.publish_actions_enabled = bool(publish_actions)
         self.dry_run = bool(dry_run)
+        self.eef_left_topic = eef_left_topic
+        self.eef_right_topic = eef_right_topic
+        self.include_eef = eef_left_topic is not None
+        self.eef_control = bool(eef_control)
+        self.eef_left_action_topic = str(eef_left_action_topic)
+        self.eef_right_action_topic = str(eef_right_action_topic)
         self.complete_frame_queue_size = DEFAULT_QUEUE_SIZE
         self.max_sync_error = DEFAULT_SYNC_ERROR
         self.max_buffer_seconds = DEFAULT_BUFFER_SECONDS
-        self.action_adapter = ActionAdapter()
-        self.synchronizer = FrameSynchronizer(self.max_sync_error, self.max_buffer_seconds)
+        self.action_adapter = action_adapter or ActionAdapter()
+        self.synchronizer = FrameSynchronizer(
+            self.max_sync_error,
+            self.max_buffer_seconds,
+            include_eef=self.include_eef,
+        )
         self.process: subprocess.Popen[str] | None = None
         self._reader_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
@@ -66,6 +99,7 @@ class Ros2BackendClient:
         self._ping_barrier_reached = False
         self._ping_barrier_released = False
         self._dropped_complete_frames = 0
+        self.hardware_fault: dict[str, Any] | None = None
         self._started = False
         self._closed = False
 
@@ -82,11 +116,21 @@ class Ros2BackendClient:
             return
         if self.dry_run and self.publish_actions_enabled:
             raise ValueError("Unsafe configuration: dry_run=True together with publish_actions=True")
-        args = [str(self.bridge_python), str(BRIDGE_SCRIPT), "--config", str(self.config)]
+        args = [str(self.bridge_python), str(BRIDGE_SCRIPT), "--config", str(self.config), "--control-stack", self.control_stack]
         if self.dry_run:
             args.append("--dry-run")
         if self.publish_actions_enabled:
             args.append("--publish-actions")
+        if self.include_eef:
+            args.extend(["--eef-left-topic", str(self.eef_left_topic), "--eef-right-topic", str(self.eef_right_topic)])
+        if self.eef_control:
+            args.extend([
+                "--eef-control",
+                "--eef-left-action-topic",
+                self.eef_left_action_topic,
+                "--eef-right-action-topic",
+                self.eef_right_action_topic,
+            ])
         self.process = subprocess.Popen(
             args,
             stdin=subprocess.PIPE,
@@ -130,6 +174,7 @@ class Ros2BackendClient:
 
     def publish_action(self, action: np.ndarray) -> None:
         self._ensure_started()
+        self._raise_if_error()
         request = self.action_adapter.to_bridge_request(action)
         self._send_request(request)
 
@@ -236,7 +281,10 @@ class Ros2BackendClient:
         if "jpeg_b64" in message:
             value = self._decode_jpeg_payload(message["jpeg_b64"])
         elif "values" in message:
-            value = self._decode_joint_payload(message["values"])
+            if sensor in EEF_SENSORS:
+                value = self._decode_vector_payload(message["values"], EEF_DIMENSION, "EEF")
+            else:
+                value = self._decode_vector_payload(message["values"], JOINT_DIMENSION, "joint")
         else:
             raise RuntimeError("sensor event must contain jpeg_b64 or values")
 
@@ -266,23 +314,31 @@ class Ros2BackendClient:
             raise RuntimeError("sensor image payload is not valid base64") from exc
 
     def _decode_joint_payload(self, payload: object) -> np.ndarray:
+        return self._decode_vector_payload(payload, JOINT_DIMENSION, "joint")
+
+    def _decode_vector_payload(self, payload: object, dimension: int, label: str) -> np.ndarray:
         if not isinstance(payload, (list, tuple)):
-            raise RuntimeError("joint sensor values must be a list or tuple")
-        if len(payload) != 7:
-            raise RuntimeError("joint sensor values must contain exactly seven values")
+            raise RuntimeError(f"{label} sensor values must be a list or tuple")
+        if len(payload) != dimension:
+            word = "six" if dimension == EEF_DIMENSION else "seven"
+            raise RuntimeError(f"{label} sensor values must contain exactly {word} values")
 
         values: list[float] = []
         for raw_value in payload:
             if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-                raise RuntimeError("joint sensor values must be real JSON numbers")
+                raise RuntimeError(f"{label} sensor values must be real JSON numbers")
             value = float(raw_value)
             if not math.isfinite(value):
-                raise RuntimeError("joint sensor values must be finite")
+                raise RuntimeError(f"{label} sensor values must be finite")
             values.append(value)
         return np.asarray(values, dtype=np.float32)
 
     def _handle_status_message(self, message: dict[str, Any]) -> None:
-        if message.get("state") != "pong":
+        state = message.get("state")
+        if state == "hardware_fault":
+            self._record_hardware_fault(message)
+            return
+        if state != "pong":
             return
         metadata = message.get("metadata")
         pong_id = metadata.get("id") if isinstance(metadata, dict) else message.get("id")
@@ -296,6 +352,15 @@ class Ros2BackendClient:
             self._barrier_condition.notify_all()
             while self._pending_ping_barrier_id == pending_id and not self._ping_barrier_released and not self._stop_event.is_set():
                 self._barrier_condition.wait(timeout=0.05)
+
+
+    def _record_hardware_fault(self, message: dict[str, Any]) -> None:
+        metadata = message.get("metadata")
+        fault_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        self.hardware_fault = fault_metadata
+        reason = fault_metadata.get("reason", "hardware fault")
+        if not self.dry_run:
+            self._set_error(f"hardware fault: {reason}", priority=30)
 
     def _clear_frame_state(self) -> None:
         with self._frame_lock:
