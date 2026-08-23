@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections import deque
 from pathlib import Path
 import sys
+import time
 
 import cv2
 import numpy as np
 import pytest
+import yaml
 
 workspace_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(workspace_root / "packages/openpi-client/src"))
@@ -19,6 +21,7 @@ from frame_synchronizer import REQUIRED_SENSORS
 from frame_synchronizer import SynchronizedFrame
 from observation_adapter import DEFAULT_CAMERA_SPECS
 from ros2_environment import Ros2DualEnvironment
+from control_stack import profile_for
 
 
 def _jpeg_bytes(color: tuple[int, int, int]) -> bytes:
@@ -109,11 +112,11 @@ class FakeBackend:
         self.close_calls += 1
 
 
-
 class MutatingPublishBackend(FakeBackend):
     def publish_action(self, action: np.ndarray) -> None:
         super().publish_action(action)
         self.publish_action_calls[-1][...] = np.float32(0.5)
+
 
 @pytest.fixture
 def backend() -> FakeBackend:
@@ -129,6 +132,40 @@ def test_reset_starts_backend_and_clears_buffers_without_publishing_actions(back
     assert backend.clear_calls == 1
     assert backend.publish_action_calls == []
     assert env.is_episode_complete() is False
+
+
+def test_constructor_loads_required_max_action_delta_from_shipped_contract() -> None:
+    env = Ros2DualEnvironment(backend=FakeBackend())
+
+    assert env._max_action_delta == pytest.approx(0.05)
+
+
+def test_constructor_rejects_config_missing_required_max_action_delta(tmp_path: Path) -> None:
+    shipped_config = yaml.safe_load((Path(__file__).resolve().parents[1] / "ros2_piper_dual.yaml").read_text(encoding="utf-8"))
+    config_path = tmp_path / "ros2-missing-max-action-delta.yaml"
+    control = dict(shipped_config["bridge_contract"]["control"])
+    control.pop("max_action_delta")
+    shipped_config["bridge_contract"]["control"] = control
+    config_path.write_text(yaml.safe_dump(shipped_config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="max_action_delta"):
+        Ros2DualEnvironment(backend=FakeBackend(), ros2_config=config_path)
+
+
+def test_constructor_rejects_invalid_configured_max_action_delta(tmp_path: Path) -> None:
+    shipped_config = yaml.safe_load((Path(__file__).resolve().parents[1] / "ros2_piper_dual.yaml").read_text(encoding="utf-8"))
+    config_path = tmp_path / "ros2-invalid-max-action-delta.yaml"
+    shipped_config["bridge_contract"]["control"]["max_action_delta"] = -0.1
+    config_path.write_text(yaml.safe_dump(shipped_config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="max_action_delta"):
+        Ros2DualEnvironment(backend=FakeBackend(), ros2_config=config_path)
+
+
+def test_constructor_respects_explicit_valid_max_action_delta_override() -> None:
+    env = Ros2DualEnvironment(backend=FakeBackend(), max_action_delta=0.2)
+
+    assert env._max_action_delta == pytest.approx(0.2)
 
 
 @pytest.mark.parametrize("max_action_delta", [np.nan, np.inf, -np.inf])
@@ -152,6 +189,27 @@ def test_constructor_accepts_zero_max_action_delta() -> None:
 
     assert len(backend.publish_action_calls) == 2
 
+
+
+@pytest.mark.parametrize("control_stack", ["local-ros", "direct-sdk"])
+def test_environment_forwards_control_stack_to_backend(monkeypatch, control_stack: str) -> None:
+    captured: list[dict[str, object]] = []
+
+    class CapturingBackend:
+        def __init__(self, **kwargs):
+            captured.append(dict(kwargs))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("ros2_environment.Ros2BackendClient", CapturingBackend)
+
+    Ros2DualEnvironment(
+        ros2_config=profile_for(control_stack).config_path,
+        control_stack=control_stack,
+    )
+
+    assert captured[-1]["control_stack"] == control_stack
 
 @pytest.mark.parametrize(
     ("backend", "expected_error"),
@@ -236,6 +294,18 @@ def test_invalid_action_marks_episode_complete_and_rejects_future_actions() -> N
     assert backend.publish_action_calls == []
 
 
+def test_get_observation_includes_pi05_policy_field_aliases() -> None:
+    backend = FakeBackend([_make_frame(2.0)])
+    env = Ros2DualEnvironment(backend=backend, prompt="stack", watchdog_timeout=0.1)
+
+    env.reset()
+    observation = env.get_observation()
+
+    np.testing.assert_array_equal(observation["state"], np.arange(14, dtype=np.float32))
+    assert observation["prompt"] == "stack"
+    assert set(observation["images"]) == {spec.name for spec in DEFAULT_CAMERA_SPECS}
+
+
 def test_get_observation_maps_ros2_frame_to_model_contract() -> None:
     backend = FakeBackend([_make_frame(2.0)])
     env = Ros2DualEnvironment(backend=backend, prompt="stack", watchdog_timeout=0.1)
@@ -243,7 +313,9 @@ def test_get_observation_maps_ros2_frame_to_model_contract() -> None:
     env.reset()
     observation = env.get_observation()
 
-    assert set(observation) == {"observation.state", "images", "timestamps", "sync_error", "task"}
+    assert set(observation) == {
+        "state", "prompt", "observation.state", "images", "timestamps", "sync_error", "task"
+    }
     np.testing.assert_array_equal(observation["observation.state"], np.arange(14, dtype=np.float32))
     assert observation["observation.state"].dtype == np.float32
     assert observation["task"] == "stack"
@@ -363,6 +435,7 @@ def test_fatal_fault_rejects_future_actions_and_survives_reset(
     for actual, expected in zip(backend.publish_action_calls, reset_publish_snapshot):
         np.testing.assert_array_equal(actual, expected)
 
+
 def test_max_step_completion_remains_resettable() -> None:
     backend = FakeBackend()
     env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True, max_episode_steps=1)
@@ -402,6 +475,7 @@ def test_apply_action_publishes_only_when_explicitly_enabled() -> None:
     np.testing.assert_array_equal(backend.publish_action_calls[0], np.arange(14, dtype=np.float32))
     assert backend.publish_action_calls[0].dtype == np.float32
 
+
 def test_apply_action_enforces_configured_per_step_delta_limit() -> None:
     backend = FakeBackend()
     env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True, max_action_delta=0.1)
@@ -414,6 +488,7 @@ def test_apply_action_enforces_configured_per_step_delta_limit() -> None:
 
     assert env.is_episode_complete() is True
     assert len(backend.publish_action_calls) == 1
+
 
 def test_apply_action_snapshots_float32_caller_arrays_before_publish_and_delta_check() -> None:
     backend = FakeBackend()
@@ -450,7 +525,6 @@ def test_backend_publish_mutation_cannot_corrupt_previous_action_delta_baseline(
 
     assert env.is_episode_complete() is True
     assert len(backend.publish_action_calls) == 1
-
 
 
 def test_stale_observation_watchdog_raises_when_timestamp_stops_advancing() -> None:
@@ -502,3 +576,8 @@ def test_ros2_environment_module_does_not_import_sdk_hardware_modules() -> None:
     env.reset()
 
     assert forbidden.isdisjoint(sys.modules)
+
+
+def test_constructor_loads_yaml_contract_control_and_uses_safe_loader() -> None:
+    config = yaml.safe_load((Path(__file__).resolve().parents[1] / "ros2_piper_dual.yaml").read_text(encoding="utf-8"))
+    assert config["bridge_contract"]["control"]["max_action_delta"] == 0.05

@@ -13,6 +13,7 @@ from typing_extensions import override
 from action_adapter import ActionAdapter
 from observation_adapter import ObservationAdapter
 from ros2_backend import Ros2BackendClient
+from ros2_contract import BridgeContract
 
 DEFAULT_BRIDGE_PYTHON = Path("/usr/bin/python3")
 DEFAULT_ROS2_CONFIG = Path(__file__).resolve().with_name("ros2_piper_dual.yaml")
@@ -38,14 +39,17 @@ class Ros2DualEnvironment(_environment.Environment):
         frame_timeout: float = DEFAULT_FRAME_TIMEOUT,
         max_episode_steps: int = 500,
         max_action_delta: float | None = None,
+        control_stack: str = "official-ros",
         **_: Any,
     ) -> None:
         if type(prompt) is not str:
             raise ValueError("prompt must be a string")
         if dry_run and publish_actions:
             raise ValueError("publish_actions requires dry_run=False")
+
+        contract = BridgeContract.from_mapping(self._load_config(ros2_config))
         if max_action_delta is None:
-            max_action_delta_value = None
+            max_action_delta_value = contract.control.max_action_delta
         else:
             max_action_delta_value = float(max_action_delta)
             if not np.isfinite(max_action_delta_value) or max_action_delta_value < 0:
@@ -56,6 +60,7 @@ class Ros2DualEnvironment(_environment.Environment):
             config=ros2_config,
             dry_run=dry_run,
             publish_actions=publish_actions,
+            control_stack=control_stack,
         )
         self._observation_adapter = observation_adapter or ObservationAdapter(task=prompt)
         self._action_adapter = action_adapter or ActionAdapter()
@@ -73,6 +78,17 @@ class Ros2DualEnvironment(_environment.Environment):
         self._step_count = 0
         self._last_observation_timestamp: float | None = None
         self._previous_action: np.ndarray | None = None
+
+    @staticmethod
+    def _load_config(ros2_config: Path) -> dict[str, Any]:
+        import yaml
+
+        config_path = Path(ros2_config)
+        with config_path.open("r", encoding="utf-8") as stream:
+            data = yaml.safe_load(stream)
+        if not isinstance(data, dict):
+            raise ValueError("ROS 2 config must be a mapping")
+        return data
 
     @override
     def reset(self) -> None:
@@ -122,12 +138,16 @@ class Ros2DualEnvironment(_environment.Environment):
                 observation = self._observation_adapter.adapt(
                     {
                         "state": frame.state,
+                        "action": frame.action,
+                        "eef": frame.eef,
                         "images": frame.images,
                         "timestamps": frame.sensor_timestamps,
                         "sync_error": self._sync_error_scalar(frame.sync_error),
                         "task": self._prompt,
                     }
                 )
+                observation["state"] = observation["observation.state"]
+                observation["prompt"] = observation["task"]
             except Exception:
                 self._fail_episode()
                 raise

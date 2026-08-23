@@ -355,17 +355,17 @@ class PiperRos2Bridge(Node):
         self._ensure_publishers_ready(validate_graph=True)
 
     def _ensure_eef_publishers_ready(self) -> None:
-        self._ensure_publishers_ready(validate_graph=False)
+        self._ensure_publishers_ready()
 
-    def _ensure_publishers_ready(self, *, validate_graph: bool) -> None:
+    def _ensure_publishers_ready(self, *, validate_graph: bool = True) -> None:
         if self._action_publishing_disabled_reason is not None:
             raise RuntimeError(f"Action publishing permanently disabled: {self._action_publishing_disabled_reason}")
-        if self._action_publishers:
-            return
         try:
             if validate_graph:
                 validate_profile_graph(self, self._profile, self._contract)
             self._assert_live_joint_ready()
+            if self._action_publishers:
+                return
             publisher_type = PosCmd if self._eef_control else JointState
             for arm, topic in self._endpoint_plan.action_publishers:
                 self._action_publishers[arm] = self.create_publisher(publisher_type, topic, self._qos_depth)

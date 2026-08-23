@@ -45,10 +45,19 @@ def _complete_topic_types(contract: BridgeContract) -> dict[str, list[str]]:
         topics[topic] = ["sensor_msgs/msg/JointState"]
     for topic in contract.status_topics.values():
         topics[topic] = ["piper_msgs/msg/PiperStatusMsg"]
+    for topic in contract.eef_action_topics.values():
+        topics[topic] = ["piper_msgs/msg/PosCmd"]
     return topics
 
 
-def _construct_test_bridge(monkeypatch, *, dry_run: bool, publish_actions: bool, control_stack: str = "official-ros"):
+def _construct_test_bridge(
+    monkeypatch,
+    *,
+    dry_run: bool,
+    publish_actions: bool,
+    control_stack: str = "official-ros",
+    eef_control: bool = False,
+):
     from ros2_bridge_process import LockedJsonLineWriter
     from ros2_bridge_process import PiperRos2Bridge
 
@@ -101,11 +110,19 @@ def _construct_test_bridge(monkeypatch, *, dry_run: bool, publish_actions: bool,
         contract=contract,
         config=config,
         control_stack=control_stack,
+        eef_control=eef_control,
     )
     node.get_topic_names_and_types = lambda: [(topic, list(types)) for topic, types in _complete_topic_types(contract).items()]
-    node.count_subscribers = lambda topic: 1 if topic in contract.joint_action_topics.values() else 0
+    selected_action_topics = contract.eef_action_topics.values() if eef_control else contract.joint_action_topics.values()
+    node.count_subscribers = lambda topic: 1 if topic in selected_action_topics else 0
     node.get_node_names = lambda: []
     return node, contract, calls
+
+
+def _mark_status_ready(node) -> None:
+    now = time.monotonic()
+    node._status_latch.update("left", StatusMessage(), received_at=now)
+    node._status_latch.update("right", StatusMessage(), received_at=now)
 
 
 class Header:
@@ -286,6 +303,42 @@ def test_bridge_live_readiness_failure_latches_without_creating_publishers(monke
         node._handle_request({"type": "publish_action", "left": [0.0] * 7, "right": [0.0] * 7})
     assert calls["publishers"] == []
 
+
+
+def test_bridge_rechecks_status_before_every_live_joint_publish(monkeypatch):
+    node, _contract, calls = _construct_test_bridge(monkeypatch, dry_run=False, publish_actions=True)
+    _mark_status_ready(node)
+    node._handle_request({"type": "publish_action", "left": [0.0] * 7, "right": [0.0] * 7})
+
+    class FaultStatus(StatusMessage):
+        arm_status = 1
+
+    node._status_latch.update("left", FaultStatus(), received_at=time.monotonic())
+
+    with pytest.raises(RuntimeError, match="permanently disabled"):
+        node._handle_request({"type": "publish_action", "left": [0.1] * 7, "right": [0.1] * 7})
+    assert len(calls["published"]) == 2
+
+    node._status_latch.update("left", StatusMessage(), received_at=time.monotonic())
+    with pytest.raises(RuntimeError, match="permanently disabled"):
+        node._handle_request({"type": "publish_action", "left": [0.2] * 7, "right": [0.2] * 7})
+    assert len(calls["published"]) == 2
+
+
+def test_bridge_eef_live_publishers_require_profile_graph_and_status_ready(monkeypatch):
+    node, _contract, calls = _construct_test_bridge(
+        monkeypatch,
+        dry_run=False,
+        publish_actions=True,
+        eef_control=True,
+    )
+    node.count_subscribers = lambda _topic: 0
+    _mark_status_ready(node)
+
+    with pytest.raises(RuntimeError, match="exactly one external subscriber"):
+        node._handle_request({"type": "publish_eef_action", "left": [0.0] * 7, "right": [0.0] * 7})
+    assert calls["publishers"] == []
+    assert calls["published"] == []
 
 def test_bridge_constructor_rejects_config_identity_mismatch(monkeypatch):
     from ros2_bridge_process import LockedJsonLineWriter

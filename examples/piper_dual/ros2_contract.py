@@ -168,7 +168,7 @@ def validate_profile_graph(node: Any, profile: ControlStackProfile, contract: Br
         if not any(profile.direct_adapter_node in name for name in node_names):
             raise ValueError(f"control stack {profile.stack_id} missing required node {profile.direct_adapter_node}")
 
-    for topic in profile.action_topics:
+    for topic in contract.joint_action_topics.values():
         subscriber_count = int(node.count_subscribers(topic))
         if subscriber_count != 1:
             raise ValueError(

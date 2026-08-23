@@ -207,3 +207,22 @@ def test_profile_graph_rejects_action_topics_without_exactly_one_external_subscr
 
     with pytest.raises(ValueError, match="exactly one external subscriber"):
         validate_profile_graph(node, profile, contract)
+
+
+def test_profile_graph_rejects_selected_contract_action_topic_without_subscriber() -> None:
+    profile = profile_for("official-ros")
+    mapping = _load_complete_mapping()
+    bridge = dict(mapping["bridge_contract"])
+    bridge["joint_action_topics"] = {
+        "left": "/custom/joint_left_cmd",
+        "right": "/custom/joint_right_cmd",
+    }
+    mapping = dict(mapping)
+    mapping["bridge_contract"] = bridge
+    contract = BridgeContract.from_mapping(mapping)
+    topics = _complete_topic_types(contract)
+    subscriber_counts = {topic: 1 for topic in profile.action_topics}
+    node = FakeGraphNode(topics=topics, subscriber_counts=subscriber_counts)
+
+    with pytest.raises(ValueError, match="/custom/joint_left_cmd"):
+        validate_profile_graph(node, profile, contract)
