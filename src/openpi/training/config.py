@@ -21,6 +21,8 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.piper_policy as piper_policy
+import openpi.policies.piper_eef_policy as piper_eef_policy
+import openpi.policies.piper_eef_xyz3d_policy as piper_eef_xyz3d_policy
 import openpi.policies.flexiv_policy as flexiv_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -90,6 +92,8 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+    # Optional LeRobot episode subset; None preserves the full dataset.
+    episodes: Sequence[int] | None = None
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -402,15 +406,17 @@ class LeRobotPiperDataConfig(DataConfigFactory):
     )
     # Action keys that will be used to read the action sequence from the dataset.
     action_sequence_keys: Sequence[str] = ("action",)
+    # Number of action dimensions exposed by the policy after model inference.
+    output_action_dim: int = 14
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         data_transforms = _transforms.Group(
             inputs=[piper_policy.PiperInputs(adapt_to_pi=self.adapt_to_pi)],
-            outputs=[piper_policy.PiperOutputs(adapt_to_pi=self.adapt_to_pi)],
+            outputs=[piper_policy.PiperOutputs(adapt_to_pi=self.adapt_to_pi, action_dim=self.output_action_dim)],
         )
         if self.use_delta_joint_actions:
-            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask),
                 _transforms.DeltaActions_Prev(delta_action_mask)],
@@ -424,6 +430,84 @@ class LeRobotPiperDataConfig(DataConfigFactory):
             repack_transforms=self.repack_transforms,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPiperEefRot6dDataConfig(DataConfigFactory):
+    default_prompt: str | None = None
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "cam_high": "observation.images.cam_high",
+                            "cam_left_wrist": "observation.images.cam_left_wrist",
+                            "cam_right_wrist": "observation.images.cam_right_wrist",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                        "episode_index": "episode_index",
+                        "frame_index": "frame_index",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=_transforms.Group(
+                inputs=[piper_eef_policy.PiperEefRot6dInputs()],
+                outputs=[piper_eef_policy.PiperEefRot6dOutputs()],
+            ),
+            model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotPiperEefXyz3dDataConfig(DataConfigFactory):
+    default_prompt: str | None = None
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "cam_high": "observation.images.cam_high",
+                            "cam_left_wrist": "observation.images.cam_left_wrist",
+                            "cam_right_wrist": "observation.images.cam_right_wrist",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                        "episode_index": "episode_index",
+                        "frame_index": "frame_index",
+                    }
+                )
+            ]
+        )
+    )
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=_transforms.Group(
+                inputs=[piper_eef_xyz3d_policy.PiperEefXyz3dInputs()],
+                outputs=[piper_eef_xyz3d_policy.PiperEefXyz3dOutputs()],
+            ),
+            model_transforms=ModelTransformFactory(default_prompt=self.default_prompt)(model_config),
             action_sequence_keys=self.action_sequence_keys,
         )
 
@@ -736,6 +820,140 @@ _CONFIGS = [
         policy_metadata={"reset_pose": [0, 0, 0, 0, 0, 0]},
     ),
     TrainConfig(
+        name="pi05_piper_dual_stack_cups",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=50, discrete_state_input=False),
+        data=LeRobotPiperDataConfig(
+            repo_id="HITdongdong/piper_dual_stack_cups_ros2",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Stack the paper cups together.",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                            "episode_index": "episode_index",
+                            "frame_index": "frame_index",
+                        }
+                    )
+                ]
+            ),
+        ),
+        batch_size=64,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_stack_cups_shifted",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=50, discrete_state_input=False),
+        data=LeRobotPiperDataConfig(
+            repo_id="HITdongdong/piper_dual_stack_cups_ros2",
+            assets=AssetsConfig(asset_id="HITdongdong/piper_dual_stack_cups_ros2_shifted"),
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Stack the paper cups together.",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                            "episode_index": "episode_index",
+                            "frame_index": "frame_index",
+                        }
+                    )
+                ]
+            ),
+        ),
+        batch_size=64,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_stack_cups_eef_xyz3d",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_stack_cups_eef_xyz3d",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Stack the paper cups together.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/pfs/pfs-7jnepv/lgd/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=64,
+        num_workers=0,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_stack_cups_eef_rot6d",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefRot6dDataConfig(
+            repo_id="HITdongdong/piper_dual_stack_cups_eef_rot6d_shifted",
+            assets=AssetsConfig(asset_id="HITdongdong/piper_dual_stack_cups_eef_rot6d_shifted"),
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Stack the paper cups together.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/agilex/checkpoints/pi05_piper_dual_stack_cups_pi05_10ep_step15000_pytorch"
+        ),
+        batch_size=64,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_stack_cups_eef_rot6d_20ep",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefRot6dDataConfig(
+            repo_id="HITdongdong/piper_dual_stack_cups_eef_rot6d_shifted",
+            assets=AssetsConfig(asset_id="HITdongdong/piper_dual_stack_cups_eef_rot6d_shifted_20ep"),
+            base_config=DataConfig(prompt_from_task=True, episodes=tuple(range(20))),
+            default_prompt="Stack the paper cups together.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/agilex/checkpoints/pi05_piper_dual_stack_cups_pi05_10ep_step15000_pytorch"
+        ),
+        batch_size=64,
+        num_train_steps=20_000,
+        save_interval=5_000,
+        keep_period=5_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
         name="pi0_aloha_towel",
         model=pi0_config.Pi0Config(),
         data=LeRobotAlohaDataConfig(
@@ -919,6 +1137,29 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
+    TrainConfig(
+        name="pi05_libero_mem_bowl_two_tasks",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotLiberoDataConfig(
+            repo_id="HITdongdong/libero_mem_bowl_two_tasks",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        save_interval=5_000,
+        keep_period=5_000,
+        fsdp_devices=4,
+    ),
     #
     # Fine-tuning Aloha configs.
     #
@@ -1086,6 +1327,36 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/workspace/pjk/ELM/openpi/checkpoints/openpi/openpi-assets/checkpoints/pi05_base_pytorch",
+        num_train_steps=20000,
+        batch_size=64,
+    ),
+    TrainConfig(
+        name="pi05_magic_cobot_pick",
+        model=pi0_config.Pi0Config(pi05=True, advantage_input=False),
+        data=LeRobotPiperDataConfig(
+            repo_id="magic_cobot_pick_lerobot",
+            assets=AssetsConfig(
+                assets_dir="/home/agilex/lgd/lgd_checkpoints/pi05_magic_cobot_pick_jax_step2000/assets",
+                asset_id="HITdongdong/magic_cobot_pick_lerobot",
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                        }
+                    )
+                ]
+            ),
+        ),
         num_train_steps=20000,
         batch_size=64,
     ),
