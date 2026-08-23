@@ -70,3 +70,34 @@ action:
     - rad
     - rad
     - m
+bridge_contract:
+  joint_topics:
+    /joint_left: puppet_left
+    /joint_right: puppet_right
+    /joint_states_ctrl_left: master_left
+    /joint_states_ctrl_right: master_right
+  joint_action_topics:
+    left: /joint_ctrl_cmd_left
+    right: /joint_ctrl_cmd_right
+  eef_topics:
+    left: /end_pose_stamped_left
+    right: /end_pose_stamped_right
+  eef_action_topics:
+    left: /pos_left_cmd
+    right: /pos_right_cmd
+  status_topics:
+    left: /arm_status_left
+    right: /arm_status_right
+  joint_names:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+    - gripper
+  control:
+    speed_percent: 30
+    gripper_effort: 0.5
+    max_action_delta: 0.05
+    status_watchdog_s: 0.5

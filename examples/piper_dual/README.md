@@ -108,14 +108,62 @@ python examples/piper_dual/collect_data_ros2.py \
 - `--max-sync-error-ms`: 同步帧允许的最大传感器时间误差。
 - `--dry-run`: 默认启用，保证采集器/bridge 不发布动作。
 - `--publish-actions`: 默认关闭；只有明确需要且不使用 `--dry-run` 时才会启用动作发布。
-- `--render-after-save`: 每次按 `e` finalize 后在 HDF5 旁边导出 `.preview.mp4` 三相机预览视频。
+- `--render-after-save`: 每次按 `s` finalize 后在 HDF5 旁边导出 `.preview.mp4` 三相机预览视频。
 
 窗口会预览 `cam_high`、`cam_left_wrist`、`cam_right_wrist` 三路相机并显示状态与 prompt。按键说明：
-- `s`: 从 PREVIEW 进入 RECORDING；采集器先执行 ROS 2 同步缓存清空 barrier，然后打开下一个唯一 `.hdf5.partial` 文件。
-- `e`: 结束当前 episode，停止追加帧，finalize/validate HDF5，可选渲染，然后回到 PREVIEW，可继续按 `s` 录制下一段；如果当前 episode 为空或 HDF5 验证失败，采集器会显示失败原因、删除未发布的 `.hdf5.partial`，并回到 PREVIEW，不会关闭 ROS 2 backend。
+- `s`: 在 PREVIEW 开始录制；在 RECORDING 再按一次 `s` 结束当前 episode、finalize/validate HDF5，可选渲染，然后回到 PREVIEW；如果当前 episode 为空或 HDF5 验证失败，采集器会显示失败原因、删除未发布的 `.hdf5.partial`，并回到 PREVIEW，不会关闭 ROS 2 backend。
 - `q`: 退出；如果有未 finalize 的 partial 文件会 abort，不会发布最终 HDF5。
 
+
 每个 finalize 后的 HDF5 都是自包含文件，包含三路 JPEG 图像、14 维 state/action、时间戳、同步误差和采集 metadata，可独立复制和验证。它们的根属性固定包含 `schema_version`、`frame_count`、`jpeg_quality`、`metadata_json`、`camera_mapping_json`、`units_json`、`image_preprocessing_json` 和 `timing_counters_json`；结构检测不依赖文件名。
+
+#### 4. ROS 2 EEF 数据收集（关节角度 + puppet 末端位姿）
+
+EEF 采集器在现有关节 state/action 基础上，额外同步并保存左右 puppet 臂的 `geometry_msgs/msg/PoseStamped` 末端位姿。Piper ROS 节点默认话题为 `/puppet/end_pose_left` 和 `/puppet/end_pose_right`；默认位置单位为米，姿态转换为弧度制 `[x, y, z, roll, pitch, yaw]`。
+
+```bash
+cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+source /opt/ros/humble/setup.bash
+source /home/agilex/piper_ros/install/setup.bash
+source .venv/bin/activate
+
+python examples/piper_dual/collect_data_eef_ros2.py \
+  --output-dir /home/agilex/piper_dual_dataset/fold_towel_eef \
+  --prompt "Fold the towel" \
+  --config examples/piper_dual/ros2_piper_dual.yaml \
+  --bridge-python /usr/bin/python3 \
+  --max-sync-error-ms 30 \
+  --dry-run
+```
+
+可通过 `--eef-left-topic` 和 `--eef-right-topic` 覆盖 EEF 话题。三路相机、四路关节流和两路 EEF 必须共同满足 `--max-sync-error-ms`，否则该参考帧不会写入；不会填充 NaN 或另写独立 EEF 时间序列。
+
+EEF episode 仍保持 `/observations/state` 和 `/action` 的 14 维关节格式，并额外包含：
+
+```text
+/observations/eef/puppet_left     (N, 6) float32  [x,y,z,roll,pitch,yaw]
+/observations/eef/puppet_right    (N, 6) float32  [x,y,z,roll,pitch,yaw]
+```
+
+`metadata_json.eef.enabled` 标记 EEF 文件；对应 EEF 传感器的时间戳和同步误差位于 `/observations/sensor_timestamps`、`/observations/sync_error`。当前 `convert_ros2_piper_data_to_lerobot.py` 保持原行为，不会把这些原始 EEF 数据加入 LeRobot state。
+
+将 EEF episode 转为 shifted LeRobot 数据集时，使用独立脚本；原始 HDF5 的 6D RPY 数据不会被修改：
+
+```bash
+cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+.venv/bin/python examples/piper_dual/utils/convert_ros2_piper_data_to_lerobot_eef_shifted.py \
+  --raw-dir /home/agilex/piper_dual_dataset/stack_cups_eef \
+  --repo-id local/piper_dual_stack_cups_eef_shifted \
+  --mode image
+```
+
+每个原始 EEF `[x,y,z,roll,pitch,yaw]` 按 ROS/tf2 的 XYZ RPY 约定构造 `R = Rz(yaw) Ry(pitch) Rx(roll)`，再按列保存 `rot6d=[r11,r21,r31,r12,r22,r32]`。LeRobot 的 `observation.state` 和 `action` 均为 20 维：
+
+```text
+[left_xyz, left_rot6d, left_gripper, right_xyz, right_rot6d, right_gripper]
+```
+
+时序映射与关节 shifted 转换器一致：`state[t]` 使用当前帧左右 EEF，`action[t]` 使用下一帧左右 EEF；两者的左右 gripper 均使用当前帧 master action 的 gripper。图像和 task 使用当前帧，每个 N 帧 episode 输出 N-1 帧。脚本支持 `--episodes 0,1,2` 和 `--overwrite`。原始 `convert_ros2_piper_data_to_lerobot.py` 与关节版 `convert_ros2_piper_data_to_lerobot_shifted.py` 均保持不变。
 
 #### 官方 legacy data_tools 流程（raw capture / sync / HDF5 / replay）
 
@@ -256,41 +304,137 @@ python examples/piper_dual/main_dual.py \
     --right_wrist_camera_id 8
 ```
 
-#### 4. ROS 2 安全后端（默认 dry-run）
+#### 4. ROS 2 专用部署入口（默认 dry-run）
 
-`main_dual.py` 支持安全选择 ROS 2 后端。预览阶段请保持 dry-run：
+`main_dual_ros.py` 只负责 ROS 2 bridge 和远程 PI05 server，不包含 SDK、CAN 或 USB/RealSense 设备初始化。相机节点和 Piper ROS 2 节点必须先在独立终端启动。
 
+预览和同步验证时保持 dry-run：
 ```bash
-cd /home/agilex/client
-python examples/piper_dual/main_dual.py \
-  --backend ros2 \
+cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+source .venv/bin/activate
+python examples/piper_dual/main_dual_ros.py \
+  --host 127.0.0.1 \
+  --port 8000 \
   --bridge-python /usr/bin/python3 \
   --ros2-config examples/piper_dual/ros2_piper_dual.yaml \
+  --prompt "Fold the towel" \
   --dry-run
 ```
 
-需要显式物理发布时，先完成安全检查，再使用：
+只有完成相机话题、Piper 节点、CAN、急停和低风险动作策略检查后，才显式允许动作发布：
 ```bash
-cd /home/agilex/client
-python examples/piper_dual/main_dual.py \
-  --backend ros2 \
+cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+source .venv/bin/activate
+python examples/piper_dual/main_dual_ros.py \
+  --host 127.0.0.1 \
+  --port 8000 \
   --bridge-python /usr/bin/python3 \
   --ros2-config examples/piper_dual/ros2_piper_dual.yaml \
+  --prompt "Fold the towel" \
   --no-dry-run \
   --publish-actions
 ```
 
-此命令只在确认相机、CAN、急停和低风险动作策略后使用；否则保持 `--dry-run`。
-
 安全约束：
-- `sdk` 仍然是默认后端，旧流程不变。
-- ROS 2 默认不会发布动作；只做预览和同步帧验证。
-- 只有显式提供 `--backend ros2 --no-dry-run --publish-actions` 才允许动作发布。
-- 一旦 `Ros2DualEnvironment` 在 `reset()` 阶段的 `start()` / `clear_buffers()` 失败，或在观测/动作阶段触发致命故障，同一个实例会永久锁定动作发布；即使 `reset()` 也不会恢复，必须创建新的环境/bridge 实例才能重新发布动作。
-- 如果只是验证同步和观察映射，请保持 `--dry-run`。
-- 不要在客户端脚本里启用或复位真实机械臂；ROS 2 bridge 和机械臂节点必须先按官方流程在独立终端启动。
+- `--dry-run` 是默认值；它不会发布物理动作。
+- `--publish-actions` 必须与 `--no-dry-run` 同时提供，否则入口在创建环境前退出。
+- 客户端不会启动、使能或复位真实机械臂；官方 ROS 2 节点必须预先运行。
+- `Ros2DualEnvironment` 发生致命故障后会锁定当前实例的动作发布，必须创建新实例。
 
-### 五、文件结构
+
+#### 5. EEF rot6d ROS 2 专用部署入口
+
+`main_dual_eef_ros.py` 使用 20D EEF policy：
+
+```text
+[left_xyz, left_rot6d, left_gripper,
+ right_xyz, right_rot6d, right_gripper]
+```
+
+其中 `rot6d` 按列存储旋转矩阵前两列；client 使用 Gram-Schmidt 恢复旋转矩阵并转为 Piper `PosCmd` 的 `[x,y,z,roll,pitch,yaw,gripper]`。EEF 观测话题类型为 `geometry_msgs/msg/PoseStamped`，动作话题类型为 `piper_msgs/msg/PosCmd`。
+
+先运行 dry-run 验证策略输入和同步帧：
+
+```bash
+cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+source /opt/ros/humble/setup.bash
+source /home/agilex/camera_ros/install/setup.bash
+source /home/agilex/piper_ros/install/setup.bash
+source .venv/bin/activate
+
+python examples/piper_dual/main_dual_eef_ros.py \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --bridge-python /usr/bin/python3 \
+  --ros2-config examples/piper_dual/ros2_piper_dual.yaml \
+  --prompt "Stack_the_paper_cups_together." \
+  --dry-run
+```
+
+确认策略输出、EEF 姿态、动作限幅和急停后，才允许真实 PosCmd 发布：
+
+```bash
+python examples/piper_dual/main_dual_eef_ros.py \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --bridge-python /usr/bin/python3 \
+  --ros2-config examples/piper_dual/ros2_piper_dual.yaml \
+  --prompt "Stack_the_paper_cups_together." \
+  --no-dry-run \
+  --publish-actions \
+  --max-action-delta 0.05
+```
+
+默认 topic：
+
+```text
+EEF observation: /puppet/end_pose_left, /puppet/end_pose_right
+EEF action:      /pos_left_cmd, /pos_right_cmd
+```
+
+动作发布开关、故障锁定和 cleanup 行为与关节入口一致；入口不会启动、使能或复位机械臂。建议先用 `ros2 topic type` 验证上述四个 topic 的消息类型，再进行真实发布。
+
+#### 6. EEF XYZ+RPY ROS 2 专用部署入口
+
+`main_dual_eef_xyz3d_ros.py` 使用 14D EEF policy：
+
+```text
+[left_xyz, left_rpy, left_gripper,
+ right_xyz, right_rpy, right_gripper]
+```
+
+其中位置和夹爪使用米，roll、pitch、yaw 使用弧度。服务端使用 checkpoint 匹配的 14D 归一化统计，并将模型内部 32D 输出裁剪成 14D：
+
+```bash
+cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+source .venv/bin/activate
+python scripts/serve_policy.py \
+  --port=8000 \
+  policy:checkpoint \
+  --policy.config=pi05_piper_dual_stack_cups_eef_xyz3d \
+  --policy.dir=/home/agilex/checkpoints/pi05_piper_dual_stack_cups_eef_xyz3d_jax_step10000_pytorch
+```
+
+先运行 dry-run 检查同步帧、14D 策略输出和动作变化：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agilex/camera_ros/install/setup.bash
+source /home/agilex/piper_ros/install/setup.bash
+cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+source .venv/bin/activate
+python examples/piper_dual/main_dual_eef_xyz3d_ros.py \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --bridge-python /usr/bin/python3 \
+  --ros2-config examples/piper_dual/ros2_piper_dual.yaml \
+  --prompt "Stack_the_paper_cups_together." \
+  --action-horizon 50 \
+  --dry-run
+```
+
+确认 dry-run 输出、动作限幅和急停后，才可把 `--dry-run` 替换成 `--no-dry-run --publish-actions`。默认 EEF observation/action topic、故障锁定和 cleanup 行为与 rot6d EEF 入口一致。
+### 六、文件结构
 
 ```
 examples/piper_dual/

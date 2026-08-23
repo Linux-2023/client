@@ -50,4 +50,4 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q examples/piper_du
 - The worktree has many unrelated pre-existing user edits. I staged only Task 1 paths.
 
 ## Commit
-Pending before commit.
+da1f7dd Add Piper dual control stack profiles
