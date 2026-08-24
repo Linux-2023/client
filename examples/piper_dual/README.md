@@ -111,7 +111,8 @@ python examples/piper_dual/collect_data_ros2.py \
 - `--render-after-save`: 每次按 `s` finalize 后在 HDF5 旁边导出 `.preview.mp4` 三相机预览视频。
 
 窗口会预览 `cam_high`、`cam_left_wrist`、`cam_right_wrist` 三路相机并显示状态与 prompt。按键说明：
-- `s`: 在 PREVIEW 开始录制；在 RECORDING 再按一次 `s` 结束当前 episode、finalize/validate HDF5，可选渲染，然后回到 PREVIEW；如果当前 episode 为空或 HDF5 验证失败，采集器会显示失败原因、删除未发布的 `.hdf5.partial`，并回到 PREVIEW，不会关闭 ROS 2 backend。
+- `s`: 在 PREVIEW 开始录制；在 RECORDING 时按 `s` 或 `e` 都会结束当前 episode、finalize/validate HDF5，可选渲染，然后回到 PREVIEW；如果当前 episode 为空或 HDF5 验证失败，采集器会显示失败原因、删除未发布的 `.hdf5.partial`，并回到 PREVIEW，不会关闭 ROS 2 backend。
+- `e`: 在 PREVIEW 下无操作；仅在 RECORDING 时作为 `s` 的别名完成 finalize。
 - `q`: 退出；如果有未 finalize 的 partial 文件会 abort，不会发布最终 HDF5。
 
 

@@ -228,6 +228,35 @@ def test_s_toggles_recording_and_finalizes_episode(tmp_path: Path) -> None:
     assert writer.finalized is True
     assert reports == [{"frame_count": 0, "errors": [], "path": str(writer.final_path)}]
 
+def test_e_finalizes_recording_episode_with_real_writer_and_preserves_preview_noop(tmp_path: Path, capsys) -> None:
+    backend = FakeBackend()
+    reports: list[dict] = []
+    controller = make_controller(
+        tmp_path,
+        backend=backend,
+        writer_factory=StreamingEpisodeWriter.open,
+        reports=reports,
+        validator=validate_episode,
+    )
+
+    assert controller.handle_key("e") is CollectorState.PREVIEW
+    assert controller.writer_open is False
+
+    assert controller.handle_key("s") is CollectorState.RECORDING
+    controller.process_frame(render_frame(21))
+    assert controller.handle_key("e") is CollectorState.PREVIEW
+
+    final_path = tmp_path / "episode_000000.hdf5"
+    assert final_path.exists()
+    assert validate_episode(final_path)["errors"] == []
+    assert controller.state is CollectorState.PREVIEW
+    assert controller.writer_open is False
+    assert reports[-1]["frame_count"] == 1
+    assert backend.close_calls == 0
+    output = capsys.readouterr().out
+    assert "Finalized" in output
+
+
 def test_repeated_episodes_skip_existing_outputs_and_use_distinct_files(tmp_path: Path) -> None:
     (tmp_path / "episode_000000.hdf5").write_text("existing", encoding="utf-8")
     (tmp_path / "episode_000001.hdf5.partial").write_text("existing partial", encoding="utf-8")

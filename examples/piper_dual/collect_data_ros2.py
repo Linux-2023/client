@@ -165,7 +165,7 @@ class CollectorController:
         self._current_path = final_path
         self._active_frame_count = 0
         self.state = CollectorState.RECORDING
-        print(f"Recording {final_path.with_suffix(final_path.suffix + '.partial')} (press s to finalize, q to abort)")
+        print(f"Recording {final_path.with_suffix(final_path.suffix + '.partial')} (press s or e to finalize, q to abort)")
 
     def stop_episode(self) -> Path:
         if self.state is not CollectorState.RECORDING or self._writer is None:
@@ -188,7 +188,7 @@ class CollectorController:
             self._renderer(final_path)
         self._current_path = final_path
         self.state = CollectorState.PREVIEW
-        print(f"Finalized {final_path} (press s for another episode, q to quit)")
+        print(f"Finalized {final_path} (press s to record another episode, q to quit)")
         return final_path
 
     def _abort_current_episode(self, writer: StreamingEpisodeWriter, reason: str, *, remove_partial: bool) -> Path:
@@ -212,6 +212,9 @@ class CollectorController:
             if self.state is CollectorState.PREVIEW:
                 self.start_episode()
             elif self.state is CollectorState.RECORDING:
+                self.stop_episode()
+        elif normalized == "e":
+            if self.state is CollectorState.RECORDING:
                 self.stop_episode()
         elif normalized == "q":
             self.state = CollectorState.EXIT
@@ -352,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     controller = create_controller(args)
-    print("Previewing synchronized ROS 2 frames. Press s to record, e to finalize, q to quit.")
+    print("Previewing synchronized ROS 2 frames. Press s to record; while recording, s or e finalize; q to quit.")
     try:
         run_collection_loop(controller)
     except KeyboardInterrupt:
