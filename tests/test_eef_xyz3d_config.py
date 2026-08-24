@@ -30,6 +30,40 @@ def test_eef_xyz3d_config_matches_training_contract():
     assert cfg.fsdp_devices == 4
     assert data.action_sequence_keys == ("action",)
 
+@pytest.mark.parametrize(
+    ("name", "repo_id", "prompt"),
+    [
+        (
+            "pi05_piper_dual_stack_cups_eef_xyz3d_100",
+            "HITdongdong/piper_dual_stack_cups_eef_xyz3d_100",
+            "Stack the paper cups together.",
+        ),
+        (
+            "pi05_piper_dual_fold_towel_eef_xyz3d_100",
+            "HITdongdong/piper_dual_fold_towel_eef_xyz3d_100",
+            "Fold the towel.",
+        ),
+    ],
+)
+def test_eef_xyz3d_100_configs_match_training_contract(name, repo_id, prompt):
+    cfg = config.get_config(name)
+    data = cfg.data.create(cfg.assets_dirs, cfg.model)
+
+    assert cfg.model.pi05 is True
+    assert cfg.model.action_dim == 32
+    assert cfg.model.action_horizon == 50
+    assert cfg.model.discrete_state_input is False
+    assert cfg.data.__class__.__name__ == "LeRobotPiperEefXyz3dDataConfig"
+    assert cfg.data.repo_id == repo_id
+    assert cfg.data.default_prompt == prompt
+    assert cfg.batch_size == 128
+    assert cfg.num_workers == 0
+    assert cfg.num_train_steps == 50_000
+    assert cfg.save_interval == 10_000
+    assert cfg.keep_period == 10_000
+    assert cfg.fsdp_devices == 4
+    assert data.action_sequence_keys == ("action",)
+
 
 def test_eef_xyz3d_transforms_preserve_14d_contract():
     cfg = config.get_config("pi05_piper_dual_stack_cups_eef_xyz3d")
