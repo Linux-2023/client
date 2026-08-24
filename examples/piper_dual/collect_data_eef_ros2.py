@@ -74,6 +74,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"Puppet-right PoseStamped topic (default: {DEFAULT_EEF_RIGHT_TOPIC})",
     )
     parser.add_argument(
+        "--control-stack",
+        choices=("local-ros", "official-ros", "direct-sdk"),
+        default="official-ros",
+        help="Control stack profile forwarded to the ROS 2 backend (default: official-ros)",
+    )
+    parser.add_argument(
         "--render-after-save",
         action="store_true",
         default=False,
@@ -90,6 +96,7 @@ def create_controller(args: argparse.Namespace) -> CollectorController:
         config=args.config,
         publish_actions=args.publish_actions,
         dry_run=args.dry_run,
+        control_stack=args.control_stack,
         eef_left_topic=args.eef_left_topic,
         eef_right_topic=args.eef_right_topic,
     )
