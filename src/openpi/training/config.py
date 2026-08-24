@@ -1000,6 +1000,29 @@ _CONFIGS = [
         fsdp_devices=4,
     ),
     TrainConfig(
+        name="pi05_piper_dual_weigh_apple_eef_xyz3d_100",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_weigh_apple_eef_xyz3d_100",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Weigh the apple.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/pfs/pfs-7jnepv/lgd/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=50_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
         name="pi05_piper_dual_stack_cups_eef_rot6d",
         model=pi0_config.Pi0Config(
             pi05=True,

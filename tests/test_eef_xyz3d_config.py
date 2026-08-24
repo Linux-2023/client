@@ -53,6 +53,11 @@ def test_eef_xyz3d_config_matches_training_contract():
             "HITdongdong/piper_dual_block_drawer_eef_xyz3d_100",
             "Put the block in the drawer.",
         ),
+        (
+            "pi05_piper_dual_weigh_apple_eef_xyz3d_100",
+            "HITdongdong/piper_dual_weigh_apple_eef_xyz3d_100",
+            "Weigh the apple.",
+        ),
     ],
 )
 def test_eef_xyz3d_100_configs_match_training_contract(name, repo_id, prompt):
