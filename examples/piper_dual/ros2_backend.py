@@ -70,7 +70,7 @@ class Ros2BackendClient:
         self.dry_run = bool(dry_run)
         self.eef_left_topic = eef_left_topic
         self.eef_right_topic = eef_right_topic
-        self.include_eef = eef_left_topic is not None
+        self.include_eef = eef_left_topic is not None or bool(eef_control)
         self.eef_control = bool(eef_control)
         self.eef_left_action_topic = str(eef_left_action_topic)
         self.eef_right_action_topic = str(eef_right_action_topic)
@@ -122,6 +122,8 @@ class Ros2BackendClient:
         if self.publish_actions_enabled:
             args.append("--publish-actions")
         if self.include_eef:
+            args.append("--include-eef")
+        if self.eef_left_topic is not None:
             args.extend(["--eef-left-topic", str(self.eef_left_topic), "--eef-right-topic", str(self.eef_right_topic)])
         if self.eef_control:
             args.extend([

@@ -226,6 +226,7 @@ class PiperRos2Bridge(Node):
         eef_left_action_topic: str | None = None,
         eef_right_action_topic: str | None = None,
         eef_control: bool = False,
+        include_eef: bool = False,
         control_stack: str = "official-ros",
     ) -> None:
         super().__init__("piper_dual_ros2_bridge")
@@ -260,7 +261,7 @@ class PiperRos2Bridge(Node):
             dry_run=dry_run,
             publish_actions=publish_actions,
             eef_control=self._eef_control,
-            include_eef=bool(self._contract.eef_topics),
+            include_eef=bool(include_eef or self._eef_control),
         )
         self._qos_depth = qos_depth
         self._action_publishers: dict[str, Any] = {}
@@ -541,6 +542,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--eef-left-topic", help="Optional puppet-left PoseStamped topic")
     parser.add_argument("--eef-right-topic", help="Optional puppet-right PoseStamped topic")
+    parser.add_argument("--include-eef", action="store_true", help="Subscribe to configured EEF PoseStamped topics")
     parser.add_argument("--eef-control", action="store_true", help="Publish Piper PosCmd EEF actions")
     parser.add_argument("--eef-left-action-topic", help="Optional left PosCmd action topic override")
     parser.add_argument("--eef-right-action-topic", help="Optional right PosCmd action topic override")
@@ -571,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
             eef_right_topic=args.eef_right_topic,
             eef_left_action_topic=args.eef_left_action_topic,
             eef_right_action_topic=args.eef_right_action_topic,
+            include_eef=args.include_eef,
             eef_control=args.eef_control,
             control_stack=args.control_stack,
         )

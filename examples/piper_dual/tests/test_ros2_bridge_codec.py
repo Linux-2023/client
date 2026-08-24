@@ -178,7 +178,7 @@ def test_make_joint_state_uses_official_names_speed_and_effort():
     assert msg.effort == pytest.approx([0.0] * 6 + [0.5])
 
 
-def test_bridge_uses_official_contract_topics_and_dry_run_skips_publishers(monkeypatch):
+def test_bridge_joint_only_default_ignores_yaml_eef_mappings_and_include_eef_adds_pose_streams(monkeypatch):
     config_path = Path(__file__).resolve().parents[1] / "ros2_piper_dual.yaml"
     config = _load_config(str(config_path))
     contract = BridgeContract.from_mapping(config)
@@ -214,7 +214,7 @@ def test_bridge_uses_official_contract_topics_and_dry_run_skips_publishers(monke
             joint_callback_sensors.append(sensor)
         elif topic in contract.status_topics.values():
             status_callback_sensors.append(sensor)
-        elif topic in eef_topic_values or msg_type.__name__ == "PoseStamped":
+        elif msg_type.__name__ == "PoseStamped":
             eef_callback_sensors.append(sensor)
         return object()
 
@@ -240,30 +240,54 @@ def test_bridge_uses_official_contract_topics_and_dry_run_skips_publishers(monke
         def flush(self):
             pass
 
-    eef_topic_values = {"/override/eef_left", "/override/eef_right"}
+    def construct_bridge(**kwargs):
+        return PiperRos2Bridge(
+            writer=LockedJsonLineWriter(DummyStream()),
+            dry_run=True,
+            publish_actions=True,
+            contract=contract,
+            config=config,
+            eef_control=False,
+            **kwargs,
+        )
 
-    PiperRos2Bridge(
-        writer=LockedJsonLineWriter(DummyStream()),
-        dry_run=True,
-        publish_actions=True,
-        contract=contract,
-        config=config,
-        eef_left_topic="/override/eef_left",
-        eef_right_topic="/override/eef_right",
-        eef_control=False,
-    )
+    construct_bridge()
 
     assert calls["publishers"] == []
     assert {topic for _, topic, _ in calls["subscriptions"]} == (
-        set(contract.image_topics.values())
-        | set(contract.joint_topics.keys())
-        | set(contract.status_topics.values())
-        | eef_topic_values
+        set(contract.image_topics.values()) | set(contract.joint_topics.keys()) | set(contract.status_topics.values())
     )
     assert image_callback_sensors == list(contract.image_topics.keys())
     assert joint_callback_sensors == list(contract.joint_topics.values())
     assert status_callback_sensors == list(contract.status_topics.keys())
+    assert eef_callback_sensors == []
+    assert len(image_callback_sensors) + len(joint_callback_sensors) + len(eef_callback_sensors) == 7
+    assert all(msg_type != "PoseStamped" for msg_type, _topic, _qos in calls["subscriptions"])
+
+    calls["subscriptions"].clear()
+    image_callback_sensors.clear()
+    joint_callback_sensors.clear()
+    status_callback_sensors.clear()
+    eef_callback_sensors.clear()
+
+    construct_bridge(include_eef=True)
+
+    pose_subscriptions = [(topic, qos_depth) for msg_type, topic, qos_depth in calls["subscriptions"] if msg_type == "PoseStamped"]
+    assert len(pose_subscriptions) == 2
+    assert {topic for topic, _qos_depth in pose_subscriptions} == set(contract.eef_topics.values())
     assert eef_callback_sensors == ["eef_puppet_left", "eef_puppet_right"]
+    assert len(image_callback_sensors) + len(joint_callback_sensors) + len(eef_callback_sensors) == 9
+
+    calls["subscriptions"].clear()
+    image_callback_sensors.clear()
+    joint_callback_sensors.clear()
+    status_callback_sensors.clear()
+    eef_callback_sensors.clear()
+
+    construct_bridge(include_eef=True, eef_left_topic="/override/eef_left", eef_right_topic="/override/eef_right")
+
+    override_pose_topics = {topic for msg_type, topic, _qos_depth in calls["subscriptions"] if msg_type == "PoseStamped"}
+    assert override_pose_topics == {"/override/eef_left", "/override/eef_right"}
 
 
 def test_bridge_live_publishers_are_deferred_until_first_valid_action_graph_and_status_ready(monkeypatch):
@@ -423,12 +447,13 @@ def test_bridge_constructor_rejects_config_identity_mismatch(monkeypatch):
         )
 
 
-def test_parse_args_accepts_control_stack_choice():
+def test_parse_args_accepts_control_stack_choice_and_include_eef_flag():
     from ros2_bridge_process import _parse_args
 
-    args = _parse_args(["--control-stack", "direct-sdk"])
+    args = _parse_args(["--control-stack", "direct-sdk", "--include-eef"])
 
     assert args.control_stack == "direct-sdk"
+    assert args.include_eef is True
 
 def test_format_sensor_timestamp_preserves_ros_header_stamp_as_float_seconds():
     assert _format_sensor_timestamp(Stamp(sec=123, nanosec=456_789_012)) == pytest.approx(123.456789012)

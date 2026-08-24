@@ -96,6 +96,7 @@ def test_start_uses_specified_interpreter_config_and_safety_flags(tmp_path, monk
     lines = [json.loads(line) for line in records.read_text(encoding="utf-8").splitlines()]
     assert lines[0]["executable"] == sys.executable
     assert lines[0]["argv"] == [str(bridge), "--config", str(config), "--control-stack", "official-ros", "--dry-run"]
+    assert "--include-eef" not in lines[0]["argv"]
     assert {"stdin": {"type": "stop"}} in lines
 
 
@@ -152,6 +153,7 @@ def test_start_passes_paired_eef_topics_and_enables_eef_synchronizer(tmp_path, m
     client.close()
 
     argv = json.loads(records.read_text(encoding="utf-8"))["argv"]
+    assert "--include-eef" in argv
     assert argv[-4:] == [
         "--eef-left-topic",
         "/custom/left_pose",
@@ -179,16 +181,16 @@ def test_start_passes_eef_control_flag_and_uses_injected_action_adapter(tmp_path
         config=write_config(tmp_path),
         action_adapter=adapter,
         eef_control=True,
-        eef_left_topic="/left_pose",
-        eef_right_topic="/right_pose",
     )
 
     assert client.action_adapter is adapter
+    assert client.synchronizer.include_eef is True
     client.start()
     client.close()
 
     argv = json.loads(records.read_text(encoding="utf-8"))["argv"]
     assert "--eef-control" in argv
+    assert "--include-eef" in argv
 
 
 def test_backend_requires_paired_eef_topics(tmp_path):
