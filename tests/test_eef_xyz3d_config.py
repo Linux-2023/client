@@ -43,6 +43,11 @@ def test_eef_xyz3d_config_matches_training_contract():
             "HITdongdong/piper_dual_fold_towel_eef_xyz3d_100",
             "Fold the towel.",
         ),
+        (
+            "pi05_piper_dual_beat_drum_eef_xyz3d_100",
+            "HITdongdong/piper_dual_beat_drum_eef_xyz3d_100",
+            "Beat the drum three times.",
+        ),
     ],
 )
 def test_eef_xyz3d_100_configs_match_training_contract(name, repo_id, prompt):
