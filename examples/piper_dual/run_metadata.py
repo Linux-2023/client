@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timezone
 
 from pathlib import Path
 from typing import Any, Mapping
@@ -9,6 +10,7 @@ class RunMetadataRecorder:
     def __init__(self, path: Path, metadata: Mapping[str, Any]) -> None:
         self.path = Path(path)
         self._metadata = dict(metadata)
+        self._started_at: str | None = None
         self._finished = False
         self._started = False
 
@@ -16,20 +18,27 @@ class RunMetadataRecorder:
         if self._started:
             return
         self._started = True
+        if self._started_at is None:
+            self._started_at = self._now_utc_iso()
         payload = dict(self._metadata)
-        payload["started_at"] = "start"
+        payload["started_at"] = self._started_at
         self._write_atomic(payload)
 
     def finish(self, exit_code: int, exit_reason: str) -> None:
         if self._finished:
             return
+        if self._started_at is None:
+            self._started_at = self._now_utc_iso()
         self._finished = True
         payload = dict(self._metadata)
-        payload["started_at"] = payload.get("started_at", "start")
-        payload["ended_at"] = "end"
+        payload["started_at"] = self._started_at
+        payload["ended_at"] = self._now_utc_iso()
         payload["exit_code"] = exit_code
         payload["exit_reason"] = exit_reason
         self._write_atomic(payload)
+
+    def _now_utc_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
 
     def _write_atomic(self, payload: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

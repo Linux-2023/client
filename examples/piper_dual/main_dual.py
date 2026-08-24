@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import logging
+import math
 from pathlib import Path
 import signal
 import sys
@@ -238,14 +239,17 @@ def _validate_backend_contract(args: Args) -> None:
         raise ValueError("--publish-actions requires --backend ros2")
     if args.publish_actions and args.dry_run:
         raise ValueError("--publish-actions requires --no-dry-run")
+    if not math.isfinite(args.fps) or args.fps <= 0:
+        raise ValueError("--fps must be a positive finite value")
     _comparison_out_dir(args)
 
 
 def _comparison_out_dir(args: Args) -> Path:
     if not args.run_tag:
         return args.out_dir
-    if args.run_tag in {".", ".."} or "/" in args.run_tag or "\\" in args.run_tag:
-        raise ValueError("--run-tag must be a single safe path component")
+    allowed_tags = {"local-ros", "official-ros", "direct-sdk"}
+    if args.run_tag not in allowed_tags or args.run_tag != _resolve_control_stack(args):
+        raise ValueError("--run-tag must match selected control stack: local-ros, official-ros, or direct-sdk")
     return args.out_dir / args.run_tag
 
 

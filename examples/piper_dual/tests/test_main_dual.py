@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import ast
+import math
 import subprocess
 import sys
 import types
+
+import numpy as np
 
 import pytest
 
@@ -73,6 +76,44 @@ def test_validate_backend_contract_rejects_control_stack_for_sdk_backend() -> No
 
     with pytest.raises(ValueError, match='--control-stack requires --backend ros2'):
         main_dual._validate_backend_contract(args)
+
+
+def test_validate_backend_contract_rejects_non_positive_or_non_finite_fps_before_environment(monkeypatch) -> None:
+    def fail_if_constructed(args: main_dual.Args) -> object:
+        raise AssertionError('environment must not be constructed for invalid fps')
+
+    monkeypatch.setattr(main_dual, '_build_environment', fail_if_constructed)
+
+    for invalid_fps in (0, -1, math.nan, math.inf):
+        result = main_dual.main(main_dual.Args(fps=invalid_fps))
+
+        assert result == 2
+
+
+def test_non_empty_run_tag_must_be_known_and_match_resolved_control_stack() -> None:
+    assert main_dual._comparison_out_dir(
+        main_dual.Args(out_dir=Path('runs'), control_stack='local-ros', run_tag='local-ros')
+    ) == Path('runs/local-ros')
+
+    cases = (
+        main_dual.Args(out_dir=Path('runs'), control_stack='official-ros', run_tag='local-ros'),
+        main_dual.Args(out_dir=Path('runs'), control_stack='local-ros', run_tag='unknown'),
+        main_dual.Args(out_dir=Path('runs'), backend='sdk', run_tag='direct-sdk'),
+    )
+    for args in cases:
+        with pytest.raises(ValueError, match='--run-tag must match selected control stack'):
+            main_dual._validate_backend_contract(args)
+
+
+def test_mismatched_run_tag_rejects_before_environment_creation(monkeypatch) -> None:
+    def fail_if_constructed(args: main_dual.Args) -> object:
+        raise AssertionError('environment must not be constructed for mismatched run tag')
+
+    monkeypatch.setattr(main_dual, '_build_environment', fail_if_constructed)
+
+    result = main_dual.main(main_dual.Args(control_stack='official-ros', run_tag='local-ros'))
+
+    assert result == 2
 
 
 def test_contract_summary_mentions_safe_defaults_and_selected_stack() -> None:
@@ -314,12 +355,12 @@ def test_ros2_backend_path_uses_ros2_environment_without_instantiating_sdk_hardw
     assert 'cameras' not in sys.modules
 
 def test_comparison_out_dir_separates_run_tag_and_rejects_path_separators() -> None:
-    args = main_dual.Args(out_dir=Path('runs'), run_tag='official-ros')
+    args = main_dual.Args(out_dir=Path('runs'), control_stack='official-ros', run_tag='official-ros')
 
     assert main_dual._comparison_out_dir(args) == Path('runs/official-ros')
 
     for bad_tag in ('.', '..', 'bad/tag', 'bad\\tag'):
-        with pytest.raises(ValueError, match='safe path component'):
+        with pytest.raises(ValueError, match='--run-tag must match selected control stack'):
             main_dual._comparison_out_dir(main_dual.Args(out_dir=Path('runs'), run_tag=bad_tag))
 
 
@@ -351,13 +392,47 @@ def test_build_runtime_routes_run_tagged_output_and_runtime_fps(monkeypatch) -> 
         types.SimpleNamespace(PolicyAgent=lambda policy: ('policy-agent', policy)),
     )
 
-    runtime = main_dual._build_runtime(main_dual.Args(run_tag='direct-sdk', fps=30), object(), object())
+    runtime = main_dual._build_runtime(
+        main_dual.Args(run_tag='direct-sdk', control_stack='direct-sdk', fps=30), object(), object()
+    )
 
     assert isinstance(runtime, FakeRuntime)
     assert captured['video_out_dir'] == Path('data/piper_dual/videos/direct-sdk')
     assert captured['plot_out_dir'] == Path('data/piper_dual/videos/direct-sdk')
     assert captured['plot_run_tag'] == 'direct-sdk'
     assert captured['video_fps'] == 30
+
+
+def test_video_saver_validates_fps_and_uses_subsampled_playback_fps(monkeypatch, tmp_path) -> None:
+    import importlib
+
+    calls: dict[str, object] = {}
+    fake_imageio = types.SimpleNamespace()
+
+    def fake_mimwrite(path: Path, images: list[np.ndarray], fps: float) -> None:
+        calls['path'] = path
+        calls['images'] = images
+        calls['fps'] = fps
+
+    fake_imageio.mimwrite = fake_mimwrite
+    monkeypatch.setitem(sys.modules, 'imageio', fake_imageio)
+    monkeypatch.setitem(sys.modules, 'cv2', types.SimpleNamespace())
+    monkeypatch.delitem(sys.modules, 'saver', raising=False)
+    saver_module = importlib.import_module('saver')
+
+    for invalid_fps in (0, -1, math.nan, math.inf):
+        with pytest.raises(ValueError, match='fps must be a positive finite value'):
+            saver_module.VideoSaver(tmp_path, fps=invalid_fps)
+    with pytest.raises(ValueError, match='subsample must be positive'):
+        saver_module.VideoSaver(tmp_path, subsample=0, fps=30)
+
+    video_saver = saver_module.VideoSaver(tmp_path, subsample=2, fps=30)
+    video_saver._images = [np.zeros((2, 2, 3), dtype=np.uint8), np.ones((2, 2, 3), dtype=np.uint8)]
+    video_saver.on_episode_end()
+
+    assert calls['path'] == tmp_path / 'out_0.mp4'
+    assert calls['fps'] == 15
+    assert len(calls['images']) == 1
 
 
 def test_main_records_run_metadata_for_keyboard_interrupt_and_exit_error(monkeypatch, tmp_path) -> None:
@@ -398,8 +473,116 @@ def test_main_records_run_metadata_for_keyboard_interrupt_and_exit_error(monkeyp
     monkeypatch.setattr(main_dual, '_comparison_out_dir', lambda args: tmp_path / 'direct-sdk')
     monkeypatch.setattr(main_dual, 'print', lambda *a, **k: None, raising=False)
 
-    result = main_dual.main(main_dual.Args(run_tag='direct-sdk', fps=30))
+    result = main_dual.main(main_dual.Args(run_tag='direct-sdk', control_stack='direct-sdk', fps=30))
 
     assert result == 130
     assert 'start' in events
     assert any(item.startswith('finish:130:keyboard_interrupt') for item in events)
+
+
+def test_main_records_run_metadata_for_runtime_error(monkeypatch, tmp_path) -> None:
+    events: list[str] = []
+
+    class FakeRecorder:
+        def __init__(self, path: Path, metadata: dict[str, object]) -> None:
+            events.append(f'init:{path.name}')
+
+        def start(self) -> None:
+            events.append('start')
+
+        def finish(self, exit_code: int, exit_reason: str) -> None:
+            events.append(f'finish:{exit_code}:{exit_reason}')
+
+    class FakeRuntime:
+        def run(self) -> None:
+            raise RuntimeError('boom')
+
+        def close(self) -> None:
+            events.append('runtime-close')
+
+    class FakeEnvironment:
+        def close(self) -> None:
+            events.append('environment-close')
+
+    monkeypatch.setitem(sys.modules, 'run_metadata', types.SimpleNamespace(RunMetadataRecorder=FakeRecorder))
+    monkeypatch.setattr(main_dual, '_build_environment', lambda args: FakeEnvironment())
+    monkeypatch.setattr(main_dual, '_build_policy', lambda args: object())
+    monkeypatch.setattr(main_dual, '_build_runtime', lambda args, environment, policy: FakeRuntime())
+    monkeypatch.setattr(main_dual, '_comparison_out_dir', lambda args: tmp_path / 'direct-sdk')
+    monkeypatch.setattr(main_dual, 'print', lambda *a, **k: None, raising=False)
+
+    result = main_dual.main(main_dual.Args(run_tag='direct-sdk', control_stack='direct-sdk', fps=30))
+
+    assert result == 1
+    assert 'start' in events
+    assert any(item.startswith('finish:1:RuntimeError: boom') for item in events)
+
+
+def test_main_records_run_metadata_for_normal_exit(monkeypatch, tmp_path) -> None:
+    events: list[str] = []
+
+    class FakeRecorder:
+        def __init__(self, path: Path, metadata: dict[str, object]) -> None:
+            events.append(f'init:{path.name}')
+
+        def start(self) -> None:
+            events.append('start')
+
+        def finish(self, exit_code: int, exit_reason: str) -> None:
+            events.append(f'finish:{exit_code}:{exit_reason}')
+
+    class FakeRuntime:
+        def run(self) -> None:
+            events.append('runtime-run')
+
+        def close(self) -> None:
+            events.append('runtime-close')
+
+    class FakeEnvironment:
+        def close(self) -> None:
+            events.append('environment-close')
+
+    monkeypatch.setitem(sys.modules, 'run_metadata', types.SimpleNamespace(RunMetadataRecorder=FakeRecorder))
+    monkeypatch.setattr(main_dual, '_build_environment', lambda args: FakeEnvironment())
+    monkeypatch.setattr(main_dual, '_build_policy', lambda args: object())
+    monkeypatch.setattr(main_dual, '_build_runtime', lambda args, environment, policy: FakeRuntime())
+    monkeypatch.setattr(main_dual, '_comparison_out_dir', lambda args: tmp_path / 'direct-sdk')
+    monkeypatch.setattr(main_dual, 'print', lambda *a, **k: None, raising=False)
+
+    result = main_dual.main(main_dual.Args(run_tag='direct-sdk', control_stack='direct-sdk', fps=30))
+
+    assert result == 0
+    assert 'runtime-run' in events
+    assert 'finish:0:completed' in events
+
+
+def test_three_stack_runbook_contains_exact_manual_command_blocks() -> None:
+    readme = (Path(__file__).resolve().parents[1] / 'README.md').read_text(encoding='utf-8')
+
+    required_snippets = (
+        'bash can_config.sh',
+        'source /home/agilex/piper_ros/install/setup.bash',
+        "ros2 launch piper start_two_piper.launch.py \\\n  can_left_port:=can_left can_right_port:=can_right auto_enable:=false",
+        'ros2 topic echo --once /arm_status_left',
+        'ros2 topic echo --once /arm_status_right',
+        'ros2 service call /piper_left_ctrl_node/enable_srv piper_msgs/srv/Enable "{enable_request: true}"',
+        'ros2 service call /piper_right_ctrl_node/enable_srv piper_msgs/srv/Enable "{enable_request: true}"',
+        '--control-stack local-ros',
+        '--run-tag local-ros',
+        'source /home/agilex/piper_ros/.worktrees/piper-official-humble/install-official/setup.bash',
+        "ros2 launch piper_official_bringup start_two_piper_official.launch.py \\\n  can_left_port:=can_left can_right_port:=can_right auto_enable:=false",
+        '--control-stack official-ros',
+        '--run-tag official-ros',
+        'export PYTHONPATH=/home/agilex/lgd/control_your_robot/src:$PYTHONPATH',
+        "/usr/bin/python3 examples/piper_dual/piper_direct_sdk_adapter.py \\\n  --left-can can_left --right-can can_right --allow-enable",
+        '--control-stack direct-sdk',
+        '--run-tag direct-sdk',
+        "pgrep -af 'piper_single_ctrl|piper_direct_sdk_adapter|main_dual.py|ros2_bridge_process'",
+        'ip -details link show type can',
+        'local-ros=30%',
+        'official-ros=30%',
+        'direct-sdk=100%',
+        '不是等速对比实验',
+    )
+    for snippet in required_snippets:
+        assert snippet in readme
