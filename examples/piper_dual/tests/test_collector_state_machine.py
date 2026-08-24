@@ -206,7 +206,7 @@ def test_s_clears_buffers_before_opening_partial_and_appends_only_while_recordin
     controller.process_frame(make_frame(2))
     assert [frame.timestamp for frame in writer.appended] == [1.0, 2.0]
 
-    assert controller.handle_key("e") is CollectorState.PREVIEW
+    assert controller.handle_key("s") is CollectorState.PREVIEW
     assert writer.finalized is True
     assert reports == [{"frame_count": 0, "errors": [], "path": str(writer.final_path)}]
 
@@ -214,6 +214,19 @@ def test_s_clears_buffers_before_opening_partial_and_appends_only_while_recordin
     assert [frame.timestamp for frame in writer.appended] == [1.0, 2.0]
     assert backend.publish_action_calls == []
 
+
+def test_s_toggles_recording_and_finalizes_episode(tmp_path: Path) -> None:
+    writer_factory = RecordingWriterFactory()
+    reports: list[dict] = []
+    controller = make_controller(tmp_path, writer_factory=writer_factory, reports=reports)
+
+    assert controller.handle_key("s") is CollectorState.RECORDING
+    controller.process_frame(make_frame(1))
+    assert controller.handle_key("s") is CollectorState.PREVIEW
+
+    writer = writer_factory.writers[0]
+    assert writer.finalized is True
+    assert reports == [{"frame_count": 0, "errors": [], "path": str(writer.final_path)}]
 
 def test_repeated_episodes_skip_existing_outputs_and_use_distinct_files(tmp_path: Path) -> None:
     (tmp_path / "episode_000000.hdf5").write_text("existing", encoding="utf-8")
@@ -223,11 +236,11 @@ def test_repeated_episodes_skip_existing_outputs_and_use_distinct_files(tmp_path
 
     assert controller.handle_key("s") is CollectorState.RECORDING
     controller.process_frame(make_frame(4))
-    assert controller.handle_key("e") is CollectorState.PREVIEW
+    assert controller.handle_key("s") is CollectorState.PREVIEW
 
     assert controller.handle_key("s") is CollectorState.RECORDING
     controller.process_frame(make_frame(5))
-    assert controller.handle_key("e") is CollectorState.PREVIEW
+    assert controller.handle_key("s") is CollectorState.PREVIEW
 
     assert [writer.final_path.name for writer in writer_factory.writers] == [
         "episode_000002.hdf5",
@@ -251,7 +264,7 @@ def test_empty_real_writer_episode_restores_preview_keeps_backend_and_next_valid
     )
 
     assert controller.handle_key("s") is CollectorState.RECORDING
-    assert controller.handle_key("e") is CollectorState.PREVIEW
+    assert controller.handle_key("s") is CollectorState.PREVIEW
 
     final_path = tmp_path / "episode_000000.hdf5"
     partial_path = tmp_path / "episode_000000.hdf5.partial"
@@ -267,7 +280,7 @@ def test_empty_real_writer_episode_restores_preview_keeps_backend_and_next_valid
 
     assert controller.handle_key("s") is CollectorState.RECORDING
     controller.process_frame(render_frame(10))
-    assert controller.handle_key("e") is CollectorState.PREVIEW
+    assert controller.handle_key("s") is CollectorState.PREVIEW
 
     next_final_path = tmp_path / "episode_000001.hdf5"
     assert next_final_path.exists()
@@ -291,7 +304,7 @@ def test_real_writer_validation_failure_restores_preview_removes_partial_and_all
 
     assert controller.handle_key("s") is CollectorState.RECORDING
     controller.process_frame(make_frame(11))
-    assert controller.handle_key("e") is CollectorState.PREVIEW
+    assert controller.handle_key("s") is CollectorState.PREVIEW
 
     failed_final_path = tmp_path / "episode_000000.hdf5"
     failed_partial_path = tmp_path / "episode_000000.hdf5.partial"
@@ -307,7 +320,7 @@ def test_real_writer_validation_failure_restores_preview_removes_partial_and_all
 
     assert controller.handle_key("s") is CollectorState.RECORDING
     controller.process_frame(render_frame(12))
-    assert controller.handle_key("e") is CollectorState.PREVIEW
+    assert controller.handle_key("s") is CollectorState.PREVIEW
 
     next_final_path = tmp_path / "episode_000001.hdf5"
     assert next_final_path.exists()
@@ -379,7 +392,7 @@ class FakeCv2:
         self.shown.append((window_name, image.copy()))
 
     def waitKey(self, delay: int) -> int:
-        return ord("e")
+        return ord("s")
 
     def destroyWindow(self, window_name: str) -> None:
         self.destroyed.append(window_name)
@@ -392,7 +405,7 @@ def test_preview_window_decodes_and_displays_three_cameras_without_gui_hardware(
 
     key = preview.render(make_frame(8), CollectorState.RECORDING, "Fold the towel")
 
-    assert key == "e"
+    assert key == "s"
     assert adapter.decoded == [
         b"cam_high-8",
         b"cam_left_wrist-8",
@@ -407,8 +420,7 @@ def test_preview_window_decodes_and_displays_three_cameras_without_gui_hardware(
     preview.close()
     assert cv2_module.destroyed == ["test-preview"]
 
-
-def test_arg_parser_exposes_required_flags_and_safe_defaults(tmp_path: Path) -> None:
+def test_arg_parser_exposes_required_flags_safe_defaults_and_control_stack_choices(tmp_path: Path) -> None:
     parser = build_arg_parser()
     help_text = parser.format_help()
 
@@ -422,6 +434,7 @@ def test_arg_parser_exposes_required_flags_and_safe_defaults(tmp_path: Path) -> 
         "--dry-run",
         "--publish-actions",
         "--render-after-save",
+        "--control-stack",
     ):
         assert flag in help_text
 
@@ -437,6 +450,77 @@ def test_arg_parser_exposes_required_flags_and_safe_defaults(tmp_path: Path) -> 
     assert args.bridge_python == Path("/usr/bin/python3")
     assert args.dry_run is True
     assert args.publish_actions is False
+    assert args.control_stack == "official-ros"
+
+    for control_stack in ("local-ros", "official-ros", "direct-sdk"):
+        parsed = parser.parse_args([
+            "--output-dir",
+            str(tmp_path),
+            "--prompt",
+            "Fold the towel",
+            "--config",
+            "examples/piper_dual/ros2_piper_dual.yaml",
+            "--control-stack",
+            control_stack,
+        ])
+        assert parsed.control_stack == control_stack
+
+
+def test_create_controller_forwards_selected_control_stack_to_backend_without_enabling_publish(tmp_path: Path, monkeypatch) -> None:
+    created = []
+
+    class FakeSynchronizer:
+        def __init__(self) -> None:
+            self.max_error = None
+
+    class FakeRos2Backend(FakeBackend):
+        def __init__(
+            self,
+            *,
+            bridge_python: Path,
+            config: Path,
+            publish_actions: bool,
+            dry_run: bool,
+            control_stack: str,
+        ) -> None:
+            super().__init__()
+            self.bridge_python = bridge_python
+            self.config = config
+            self.publish_actions_enabled = publish_actions
+            self.dry_run = dry_run
+            self.control_stack = control_stack
+            self.max_sync_error = None
+            self.synchronizer = FakeSynchronizer()
+            self.start_calls = 0
+            created.append(self)
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+    monkeypatch.setattr(collect_data_ros2, "Ros2BackendClient", FakeRos2Backend)
+    monkeypatch.setattr(collect_data_ros2, "ObservationAdapter", lambda task: object())
+    monkeypatch.setattr(collect_data_ros2, "PreviewWindow", lambda adapter: FakePreview())
+
+    args = build_arg_parser().parse_args([
+        "--output-dir",
+        str(tmp_path),
+        "--prompt",
+        "Fold the towel",
+        "--config",
+        "examples/piper_dual/ros2_piper_dual.yaml",
+        "--control-stack",
+        "local-ros",
+    ])
+
+    controller = create_controller(args)
+
+    assert controller.backend is created[0]
+    assert created[0].start_calls == 1
+    assert created[0].control_stack == "local-ros"
+    assert created[0].dry_run is True
+    assert created[0].publish_actions_enabled is False
+    assert created[0].max_sync_error == pytest.approx(0.03)
+    assert created[0].synchronizer.max_error == pytest.approx(0.03)
 
 
 def test_create_controller_applies_max_sync_error_to_backend_synchronizer(tmp_path: Path, monkeypatch) -> None:
@@ -447,12 +531,21 @@ def test_create_controller_applies_max_sync_error_to_backend_synchronizer(tmp_pa
             self.max_error = None
 
     class FakeRos2Backend(FakeBackend):
-        def __init__(self, *, bridge_python: Path, config: Path, publish_actions: bool, dry_run: bool) -> None:
+        def __init__(
+            self,
+            *,
+            bridge_python: Path,
+            config: Path,
+            publish_actions: bool,
+            dry_run: bool,
+            control_stack: str,
+        ) -> None:
             super().__init__()
             self.bridge_python = bridge_python
             self.config = config
             self.publish_actions_enabled = publish_actions
             self.dry_run = dry_run
+            self.control_stack = control_stack
             self.max_sync_error = None
             self.synchronizer = FakeSynchronizer()
             self.start_calls = 0
@@ -482,6 +575,39 @@ def test_create_controller_applies_max_sync_error_to_backend_synchronizer(tmp_pa
     assert created[0].start_calls == 1
     assert created[0].max_sync_error == pytest.approx(0.0125)
     assert created[0].synchronizer.max_error == pytest.approx(0.0125)
+
+
+def test_render_after_save_uses_self_contained_hdf5_schema_and_returns_to_preview(tmp_path: Path, monkeypatch) -> None:
+    opened: list[object] = []
+
+    class FakeRenderBackend(FakeBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.action_adapter = object()
+            self.synchronizer = type("Sync", (), {"include_eef": False})()
+
+    monkeypatch.setattr(collect_data_ros2, "render_episode", lambda path, output_dir: opened.append((path, output_dir)))
+    monkeypatch.setattr(collect_data_ros2, "validate_episode", lambda path: {"frame_count": 1, "errors": [], "path": str(path)})
+
+    backend = FakeRenderBackend()
+    preview = FakePreview()
+    controller = CollectorController(
+        backend=backend,
+        output_dir=tmp_path,
+        prompt="Fold the towel",
+        jpeg_quality=90,
+        preview=preview,
+        render_after_save=True,
+    )
+    controller._writer_factory = RecordingWriterFactory()
+
+    controller.start_episode()
+    controller.process_frame(make_frame(1))
+    controller.stop_episode()
+
+    assert opened
+    assert controller.state is collect_data_ros2.CollectorState.PREVIEW
+    assert backend.close_calls == 0
 
 
 def test_render_after_save_uses_self_contained_hdf5_schema_and_returns_to_preview(tmp_path: Path, monkeypatch) -> None:
@@ -521,7 +647,7 @@ def test_render_after_save_uses_self_contained_hdf5_schema_and_returns_to_previe
     assert controller.handle_key("s") is CollectorState.RECORDING
     controller.process_frame(render_frame(9))
 
-    assert controller.handle_key("e") is CollectorState.PREVIEW
+    assert controller.handle_key("s") is CollectorState.PREVIEW
     assert controller.state is CollectorState.PREVIEW
     assert len(opened) == 1
     assert opened[0].path == tmp_path / "episode_000000.preview.mp4"

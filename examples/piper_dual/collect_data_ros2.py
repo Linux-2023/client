@@ -79,7 +79,7 @@ class PreviewWindow:
         state_color = (0, 0, 255) if state is CollectorState.RECORDING else (0, 200, 0)
         self._cv2.putText(
             banner,
-            f"State: {state.value}   Keys: [s] start  [e] end/save  [q] quit",
+            f"State: {state.value}   Keys: [s] start/finish  [q] quit",
             (10, 28),
             self._cv2.FONT_HERSHEY_SIMPLEX,
             0.62,
@@ -114,6 +114,9 @@ class CollectorController:
         preview: PreviewWindow | None = None,
         render_after_save: bool = False,
         renderer: Callable[[Path], None] | None = None,
+        collector_name: str = "collect_data_ros2.py",
+        metadata_extra: dict[str, Any] | None = None,
+        writer_options: dict[str, Any] | None = None,
     ) -> None:
         self.backend = backend
         self.output_dir = Path(output_dir)
@@ -125,6 +128,9 @@ class CollectorController:
         self._preview = preview
         self._render_after_save = bool(render_after_save)
         self._renderer = renderer or _render_episode
+        self._collector_name = collector_name
+        self._metadata_extra = dict(metadata_extra or {})
+        self._writer_options = dict(writer_options or {})
         self.state = CollectorState.PREVIEW
         self._writer: StreamingEpisodeWriter | None = None
         self._current_path: Path | None = None
@@ -146,14 +152,20 @@ class CollectorController:
         metadata = {
             "prompt": self.prompt,
             "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "collector": "collect_data_ros2.py",
+            "collector": self._collector_name,
             "source": "ros2_bridge",
         }
-        self._writer = self._writer_factory(final_path, metadata=metadata, jpeg_quality=self.jpeg_quality)
+        metadata.update(self._metadata_extra)
+        writer_kwargs = {
+            "metadata": metadata,
+            "jpeg_quality": self.jpeg_quality,
+            **self._writer_options,
+        }
+        self._writer = self._writer_factory(final_path, **writer_kwargs)
         self._current_path = final_path
         self._active_frame_count = 0
         self.state = CollectorState.RECORDING
-        print(f"Recording {final_path.with_suffix(final_path.suffix + '.partial')} (press e to finalize, q to abort)")
+        print(f"Recording {final_path.with_suffix(final_path.suffix + '.partial')} (press s to finalize, q to abort)")
 
     def stop_episode(self) -> Path:
         if self.state is not CollectorState.RECORDING or self._writer is None:
@@ -197,9 +209,10 @@ class CollectorController:
             return self.state
         normalized = key.lower()
         if normalized == "s":
-            self.start_episode()
-        elif normalized == "e":
-            self.stop_episode()
+            if self.state is CollectorState.PREVIEW:
+                self.start_episode()
+            elif self.state is CollectorState.RECORDING:
+                self.stop_episode()
         elif normalized == "q":
             self.state = CollectorState.EXIT
             self.close()
@@ -251,6 +264,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_BRIDGE_PYTHON,
         help="Python interpreter used to launch the ROS 2 bridge (default: /usr/bin/python3)",
+    )
+    parser.add_argument(
+        "--control-stack",
+        choices=("local-ros", "official-ros", "direct-sdk"),
+        default="official-ros",
+        help="Control stack profile forwarded to the ROS 2 backend (default: official-ros)",
     )
     parser.add_argument(
         "--jpeg-quality",
@@ -308,6 +327,7 @@ def create_controller(args: argparse.Namespace) -> CollectorController:
         config=args.config,
         publish_actions=args.publish_actions,
         dry_run=args.dry_run,
+        control_stack=args.control_stack,
     )
     try:
         backend.max_sync_error = float(args.max_sync_error_ms) / 1000.0

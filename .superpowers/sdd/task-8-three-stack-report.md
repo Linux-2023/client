@@ -55,3 +55,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest -q examples/piper_du
 
 ## Commit
 Pending.
+
+## Collector stack propagation
+- RED: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q examples/piper_dual/tests/test_collector_state_machine.py -k 'control_stack or max_sync_error or render_after_save'` before the fix failed because the parser had no `--control-stack` coverage and `create_controller` did not forward a selected stack.
+- GREEN: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q examples/piper_dual/tests/test_collector_state_machine.py -k 'control_stack or max_sync_error or render_after_save'` -> `4 passed, 9 deselected in 0.18s`.
+- Scope: `examples/piper_dual/collect_data_ros2.py`, `examples/piper_dual/tests/test_collector_state_machine.py`.
+- Safety: dry-run remains the default and `publish_actions` stays false in the focused test path.
