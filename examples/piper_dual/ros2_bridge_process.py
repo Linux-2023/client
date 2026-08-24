@@ -361,6 +361,7 @@ class PiperRos2Bridge(Node):
         if self._action_publishing_disabled_reason is not None:
             raise RuntimeError(f"Action publishing permanently disabled: {self._action_publishing_disabled_reason}")
         try:
+            self._assert_live_joint_ready()
             if validate_graph:
                 validate_profile_graph(
                     self,
