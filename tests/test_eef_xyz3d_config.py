@@ -48,6 +48,11 @@ def test_eef_xyz3d_config_matches_training_contract():
             "HITdongdong/piper_dual_beat_drum_eef_xyz3d_100",
             "Beat the drum three times.",
         ),
+        (
+            "pi05_piper_dual_block_drawer_eef_xyz3d_100",
+            "HITdongdong/piper_dual_block_drawer_eef_xyz3d_100",
+            "Put the block in the drawer.",
+        ),
     ],
 )
 def test_eef_xyz3d_100_configs_match_training_contract(name, repo_id, prompt):
