@@ -44,19 +44,19 @@ class Args:
     control_stack: Literal["local-ros", "official-ros", "direct-sdk"] | None = None
     max_action_delta: float | None = None
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = 8001
     display: bool = False
     high_camera_id: str = "148522073709"
     left_wrist_camera_id: int = 0
     right_wrist_camera_id: int = 8
     left_can_port: str = "can_left"
     right_can_port: str = "can_right"
-    prompt: str = "Fold_the_towel"
-    use_async: bool = True
+    prompt: str = "Place the red and blue blocks on the wooden board"
+    use_async: bool = False
     use_rtc: bool = False
     gripper_norm: bool = True
     tele_mode: bool = False
-    record_mode: bool = True
+    record_mode: bool = False
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -239,6 +239,15 @@ def _validate_backend_contract(args: Args) -> None:
         raise ValueError("--publish-actions requires --backend ros2")
     if args.publish_actions and args.dry_run:
         raise ValueError("--publish-actions requires --no-dry-run")
+    _comparison_out_dir(args)
+
+
+def _comparison_out_dir(args: Args) -> Path:
+    if not args.run_tag:
+        return args.out_dir
+    if args.run_tag in {".", ".."} or "/" in args.run_tag or "\\" in args.run_tag:
+        raise ValueError("--run-tag must be a single safe path component")
+    return args.out_dir / args.run_tag
 
 
 def contract_summary(args: Args) -> str:
@@ -325,16 +334,64 @@ def _build_runtime(args: Args, environment: Any, policy: Any) -> Any:
     from plot_dynamics import RobotStatePlotter
 
     broker_for_plot = policy if args.use_async else None
+    output_dir = _comparison_out_dir(args)
     return _runtime.Runtime(
         environment=environment,
         agent=_policy_agent.PolicyAgent(policy=policy),
         subscribers=[
-            _saver.VideoSaver(args.out_dir),
-            RobotStatePlotter(args.out_dir, broker=broker_for_plot, run_tag=args.run_tag),
+            _saver.VideoSaver(output_dir, fps=args.fps),
+            RobotStatePlotter(output_dir, broker=broker_for_plot, run_tag=args.run_tag),
         ],
         max_hz=args.fps,
         num_episodes=args.num_episodes,
     )
+
+
+def _run_metadata_payload(args: Args, out_dir: Path) -> dict[str, Any]:
+    control_stack = _resolve_control_stack(args)
+    effective_speed_percent = 100 if args.backend == "sdk" or control_stack == "direct-sdk" else 30
+    return {
+        "selected_stack": control_stack,
+        "control_stack": control_stack,
+        "run_tag": args.run_tag,
+        "prompt": args.prompt,
+        "selected_output_dir": str(out_dir),
+        "policy": {
+            "mode": args.mode,
+            "host": args.host,
+            "port": args.port,
+        },
+        "runtime": {
+            "backend": args.backend,
+            "fps": args.fps,
+            "num_steps": args.num_steps,
+            "num_episodes": args.num_episodes,
+            "action_horizon": args.action_horizon,
+            "max_action_horizon": args.max_action_horizon,
+            "actions_during_latency": args.actions_during_latency,
+            "display": args.display,
+            "seed": args.seed,
+            "use_async": args.use_async,
+            "use_rtc": args.use_rtc,
+            "gripper_norm": args.gripper_norm,
+            "tele_mode": args.tele_mode,
+            "record_mode": args.record_mode,
+        },
+        "config": {
+            "bridge_python": str(args.bridge_python),
+            "ros2_config": str(args.ros2_config),
+            "dry_run": args.dry_run,
+            "publish_actions": args.publish_actions,
+            "max_action_delta": args.max_action_delta,
+            "left_can_port": args.left_can_port,
+            "right_can_port": args.right_can_port,
+            "high_camera_id": args.high_camera_id,
+            "left_wrist_camera_id": args.left_wrist_camera_id,
+            "right_wrist_camera_id": args.right_wrist_camera_id,
+        },
+        "video_fps": args.fps,
+        "effective_speed_percent": effective_speed_percent,
+    }
 
 
 def main(args: Args | argparse.Namespace | None = None) -> int:
@@ -349,11 +406,14 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
         print(f"❌ {exc}", file=sys.stderr)
         return 2
 
-    print(contract_summary(args))
-    print()
+    comparison_out_dir = _comparison_out_dir(args)
+    from run_metadata import RunMetadataRecorder
 
+    recorder = RunMetadataRecorder(comparison_out_dir / "run_metadata.json", _run_metadata_payload(args, comparison_out_dir))
     environment: Any | None = None
     runtime: Any | None = None
+    exit_code = 0
+    exit_reason = "completed"
 
     def signal_handler(sig: int, frame: Any) -> None:
         del sig, frame
@@ -368,7 +428,11 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    recorder.start()
     try:
+        print(contract_summary(args))
+        print()
+
         print("=" * 60)
         print("🤖 双臂 Piper 机器人 - ZR-0/PI05 部署")
         print("=" * 60)
@@ -410,13 +474,17 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
             print("✅ 数据保存完成")
         return 0
     except KeyboardInterrupt:
-        return 130
+        exit_code = 130
+        exit_reason = "keyboard_interrupt"
+        return exit_code
     except Exception as exc:  # noqa: BLE001 - deployment entrypoint should surface the root failure.
+        exit_code = 1
+        exit_reason = f"{type(exc).__name__}: {exc}"
         print(f"\n❌ 运行时错误: {exc}", file=sys.stderr)
         import traceback
 
         traceback.print_exc()
-        return 1
+        return exit_code
     finally:
         print("\n🔄 正在清理资源...")
         if runtime is not None and hasattr(runtime, "close"):
@@ -429,6 +497,10 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
                 environment.close()
             except Exception as exc:  # noqa: BLE001 - cleanup should not mask the primary result.
                 print(f"❌ 关闭环境时出错: {exc}", file=sys.stderr)
+        try:
+            recorder.finish(exit_code, exit_reason)
+        except Exception as exc:  # noqa: BLE001 - metadata cleanup should not mask the primary result.
+            print(f"❌ 写入运行 metadata 时出错: {exc}", file=sys.stderr)
         print("✅ 程序已完成")
 
 

@@ -312,3 +312,94 @@ def test_ros2_backend_path_uses_ros2_environment_without_instantiating_sdk_hardw
     assert records['max_action_delta'] == 0.25
     assert 'piper_dual_controller' not in sys.modules
     assert 'cameras' not in sys.modules
+
+def test_comparison_out_dir_separates_run_tag_and_rejects_path_separators() -> None:
+    args = main_dual.Args(out_dir=Path('runs'), run_tag='official-ros')
+
+    assert main_dual._comparison_out_dir(args) == Path('runs/official-ros')
+
+    for bad_tag in ('.', '..', 'bad/tag', 'bad\\tag'):
+        with pytest.raises(ValueError, match='safe path component'):
+            main_dual._comparison_out_dir(main_dual.Args(out_dir=Path('runs'), run_tag=bad_tag))
+
+
+def test_build_runtime_routes_run_tagged_output_and_runtime_fps(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeVideoSaver:
+        def __init__(self, out_dir: Path, subsample: int = 1, fps: float = 50.0) -> None:
+            captured['video_out_dir'] = out_dir
+            captured['video_subsample'] = subsample
+            captured['video_fps'] = fps
+
+    class FakePlotter:
+        def __init__(self, out_dir: Path, broker: object = None, run_tag: str = '') -> None:
+            captured['plot_out_dir'] = out_dir
+            captured['plot_run_tag'] = run_tag
+
+    class FakeRuntime:
+        def __init__(self, *, subscribers: list[object], **kwargs: object) -> None:
+            captured['runtime_kwargs'] = kwargs
+            captured['subscribers'] = subscribers
+
+    monkeypatch.setitem(sys.modules, 'saver', types.SimpleNamespace(VideoSaver=FakeVideoSaver))
+    monkeypatch.setitem(sys.modules, 'plot_dynamics', types.SimpleNamespace(RobotStatePlotter=FakePlotter))
+    monkeypatch.setitem(sys.modules, 'openpi_client.runtime.runtime', types.SimpleNamespace(Runtime=FakeRuntime))
+    monkeypatch.setitem(
+        sys.modules,
+        'openpi_client.runtime.agents.policy_agent',
+        types.SimpleNamespace(PolicyAgent=lambda policy: ('policy-agent', policy)),
+    )
+
+    runtime = main_dual._build_runtime(main_dual.Args(run_tag='direct-sdk', fps=30), object(), object())
+
+    assert isinstance(runtime, FakeRuntime)
+    assert captured['video_out_dir'] == Path('data/piper_dual/videos/direct-sdk')
+    assert captured['plot_out_dir'] == Path('data/piper_dual/videos/direct-sdk')
+    assert captured['plot_run_tag'] == 'direct-sdk'
+    assert captured['video_fps'] == 30
+
+
+def test_main_records_run_metadata_for_keyboard_interrupt_and_exit_error(monkeypatch, tmp_path) -> None:
+    events: list[str] = []
+
+    class FakeRecorder:
+        def __init__(self, path: Path, metadata: dict[str, object]) -> None:
+            events.append(f'init:{path.name}')
+            self.path = path
+            self.metadata = metadata
+            self.finished: tuple[int, str] | None = None
+
+        def start(self) -> None:
+            events.append('start')
+
+        def finish(self, exit_code: int, exit_reason: str) -> None:
+            self.finished = (exit_code, exit_reason)
+            events.append(f'finish:{exit_code}:{exit_reason}')
+
+    class FakeRuntime:
+        def __init__(self, **kwargs: object) -> None:
+            events.append('runtime-init')
+
+        def run(self) -> None:
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            events.append('runtime-close')
+
+    class FakeEnvironment:
+        def close(self) -> None:
+            events.append('environment-close')
+
+    monkeypatch.setitem(sys.modules, 'run_metadata', types.SimpleNamespace(RunMetadataRecorder=FakeRecorder))
+    monkeypatch.setattr(main_dual, '_build_environment', lambda args: FakeEnvironment())
+    monkeypatch.setattr(main_dual, '_build_policy', lambda args: object())
+    monkeypatch.setattr(main_dual, '_build_runtime', lambda args, environment, policy: FakeRuntime())
+    monkeypatch.setattr(main_dual, '_comparison_out_dir', lambda args: tmp_path / 'direct-sdk')
+    monkeypatch.setattr(main_dual, 'print', lambda *a, **k: None, raising=False)
+
+    result = main_dual.main(main_dual.Args(run_tag='direct-sdk', fps=30))
+
+    assert result == 130
+    assert 'start' in events
+    assert any(item.startswith('finish:130:keyboard_interrupt') for item in events)

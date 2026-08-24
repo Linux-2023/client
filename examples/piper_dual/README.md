@@ -257,6 +257,62 @@ python examples/piper_dual/render_dataset.py \
 自包含 HDF5 的根属性固定为 `schema_version`、`frame_count`、`jpeg_quality`、`metadata_json`、`camera_mapping_json`、`units_json`、`image_preprocessing_json` 和 `timing_counters_json`；`detect_schema()` 只会返回 `piper_dual_ros2_v1` 或 `legacy_official_hdf5`，损坏/混杂文件会直接报错。
 `visualize_hdf5.py` 检测到 `piper_dual_ros2_v1` 时会自动转调到该渲染器；旧版 HDF5 仍保持原来的关节曲线和单相机视频逻辑。
 
+#### 8. 三栈手动比较 runbook
+
+任务 7 的手动比较只允许三个运行标签：`local-ros`、`official-ros`、`direct-sdk`。每个标签都必须写入自己的 `out_dir/<run-tag>` 目录，视频、图表、CSV 和 `run_metadata.json` 不会互相混放。
+
+先停当前 `main_dual.py` 客户端，再停正在使用的控制栈，确认没有残留的控制进程或 CAN 端口占用，然后再启动下一栈。下面命令仅描述手工步骤，不会在本文件中自动执行。
+
+本节以 `main_dual.py` 为入口，`local-ros` 与 `official-ros` 通过 ROS 2 bridge 控制，`direct-sdk` 通过直连适配器控制；其中 `local-ros` / `official-ros` 的有效速度都是 30%，`direct-sdk` 的有效速度是 100%。这不是等速对比实验，不能把它写成公平的同速比较。
+
+**本地 ROS 栈**
+1. 在独立终端启动本地 ROS 2 组件并等待状态就绪。
+2. 确认控制节点和相机节点已在运行后，显式 enable 机械臂。
+3. 启动客户端：
+```bash
+cd /home/agilex/client
+python examples/piper_dual/main_dual.py \
+  --backend ros2 \
+  --control-stack local-ros \
+  --ros2-config examples/piper_dual/ros2_piper_dual_local.yaml \
+  --run-tag local-ros \
+  --dry-run
+```
+4. 若要物理发布，改为 `--no-dry-run --publish-actions`，但仍必须先完成状态检查与 enable。
+
+**官方 ROS 栈**
+1. 在官方 ROS 工作区启动官方 bringup 并等待 `/arm_status_left`、`/arm_status_right` 就绪。
+2. 显式 enable 左右臂后，再启动客户端：
+```bash
+cd /home/agilex/client
+python examples/piper_dual/main_dual.py \
+  --backend ros2 \
+  --control-stack official-ros \
+  --ros2-config examples/piper_dual/ros2_piper_dual.yaml \
+  --run-tag official-ros \
+  --dry-run
+```
+3. 物理发布同样必须显式切换为 `--no-dry-run --publish-actions`。
+
+**直连 SDK 栈**
+1. 在独立终端确认 CAN 和直连适配器进程只保留一份占用。
+2. 启动直连适配器并等待其状态输出就绪。
+3. 启动客户端：
+```bash
+cd /home/agilex/client
+python examples/piper_dual/main_dual.py \
+  --backend ros2 \
+  --control-stack direct-sdk \
+  --ros2-config examples/piper_dual/ros2_piper_dual_direct_sdk.yaml \
+  --run-tag direct-sdk \
+  --dry-run
+```
+4. 只有确认适配器与机械臂状态后，才允许去掉 `--dry-run` 并加上 `--publish-actions`。
+
+每次切换栈前都执行同样的停止顺序：先停 `main_dual.py`，再停当前控制栈，最后检查 `pgrep -af 'main_dual.py|ros2_bridge_process|piper_direct_sdk_adapter|piper_single_ctrl'` 与 CAN 设备状态，确认没有旧 owner 再启动下一栈。
+
+`run_metadata.json` 必须记录 `control_stack`、`run_tag`、`prompt`、policy host/port、runtime/config 选项、`video_fps`、`effective_speed_percent`、开始/结束时间与退出码/原因；三个栈都必须把自己的 run metadata 留在各自的 run-tag 子目录中。
+
 
 
 
