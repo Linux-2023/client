@@ -266,7 +266,10 @@ class PiperRos2Bridge(Node):
         self._qos_depth = qos_depth
         self._action_publishers: dict[str, Any] = {}
         self._action_publishing_disabled_reason: str | None = None
-        self._status_latch = PiperStatusLatch(status_watchdog_s=self._contract.control.status_watchdog_s)
+        self._status_latch = PiperStatusLatch(
+            status_watchdog_s=self._contract.control.status_watchdog_s,
+            expected_mode_feedback=(0 if self._eef_control else 1),
+        )
         self._hardware_fault_reported = False
 
         for sensor, topic in self._endpoint_plan.image_subscriptions:

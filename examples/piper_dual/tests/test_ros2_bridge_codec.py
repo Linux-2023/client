@@ -121,8 +121,11 @@ def _construct_test_bridge(
 
 def _mark_status_ready(node) -> None:
     now = time.monotonic()
-    node._status_latch.update("left", StatusMessage(), received_at=now)
-    node._status_latch.update("right", StatusMessage(), received_at=now)
+    expected_mode = node._status_latch.expected_mode_feedback
+    ready_status = StatusMessage()
+    ready_status.mode_feedback = expected_mode
+    node._status_latch.update("left", ready_status, received_at=now)
+    node._status_latch.update("right", ready_status, received_at=now)
 
 
 class Header:

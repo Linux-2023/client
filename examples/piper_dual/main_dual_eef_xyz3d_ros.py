@@ -17,9 +17,11 @@ _OPENPI_CLIENT_SRC = _PROJECT_ROOT / "packages/openpi-client/src"
 if str(_OPENPI_CLIENT_SRC) not in sys.path:
     sys.path.insert(0, str(_OPENPI_CLIENT_SRC))
 
+from control_stack import load_profile_config
 from eef_xyz3d_action_adapter import EefXyz3dActionAdapter
 from eef_xyz3d_observation_adapter import EefXyz3dObservationAdapter
 from ros2_backend import Ros2BackendClient
+from ros2_contract import BridgeContract
 from ros2_environment import DEFAULT_BRIDGE_PYTHON
 from ros2_environment import DEFAULT_FRAME_TIMEOUT
 from ros2_environment import DEFAULT_ROS2_CONFIG
@@ -108,13 +110,30 @@ def parse_args(argv: list[str] | None = None) -> Args:
     return Args(**vars(build_arg_parser().parse_args(argv)))
 
 
+def _selected_bridge_contract(args: Args) -> BridgeContract:
+    _profile, config = load_profile_config(args.control_stack, args.ros2_config)
+    return BridgeContract.from_mapping(config)
+
+
+def _effective_max_action_delta(args: Args, contract: BridgeContract | None = None) -> float:
+    selected_contract = contract if contract is not None else _selected_bridge_contract(args)
+    if args.max_action_delta is None:
+        return selected_contract.control.max_action_delta
+    requested = float(args.max_action_delta)
+    if not math.isfinite(requested) or requested < 0:
+        raise ValueError("--max-action-delta must be finite and non-negative")
+    if requested > selected_contract.control.max_action_delta:
+        raise ValueError(
+            "--max-action-delta must be less than or equal to selected config "
+            f"bridge_contract.control.max_action_delta ({selected_contract.control.max_action_delta:g})"
+        )
+    return requested
+
+
 def _validate_xyz3d_contract(args: Args) -> None:
     if args.publish_actions and args.dry_run:
         raise ValueError("--publish-actions requires --no-dry-run")
-    if args.max_action_delta is not None and (
-        not math.isfinite(args.max_action_delta) or args.max_action_delta < 0
-    ):
-        raise ValueError("--max-action-delta must be finite and non-negative")
+    _effective_max_action_delta(args)
     if not args.eef_left_topic or not args.eef_right_topic:
         raise ValueError("EEF observation topics must both be non-empty")
     if not args.eef_left_action_topic or not args.eef_right_action_topic:
@@ -122,14 +141,20 @@ def _validate_xyz3d_contract(args: Args) -> None:
 
 
 def contract_summary(args: Args) -> str:
+    contract = _selected_bridge_contract(args)
+    effective_max_delta = _effective_max_action_delta(args, contract)
     return "\n".join(
         [
             "ROS 2 XYZ3D EEF deployment contract:",
+            f"- selected_stack={args.control_stack}",
+            "- expected_control_mode=MOVE P (mode_feedback=0)",
             "- policy state/action = 14D [left_xyzrpy,left_gripper,right_xyzrpy,right_gripper]",
             f"- action_horizon={args.action_horizon}",
             f"- dry_run={args.dry_run}",
             f"- publish_actions={args.publish_actions}",
             "- publish-actions requires --no-dry-run",
+            f"- max_action_delta_safety_limit={effective_max_delta:g}",
+            f"- selected_config_max_action_delta={contract.control.max_action_delta:g}",
             f"- eef_observation_topics={args.eef_left_topic}, {args.eef_right_topic}",
             f"- eef_action_topics={args.eef_left_action_topic}, {args.eef_right_action_topic}",
             f"- bridge_python={args.bridge_python}",
@@ -140,6 +165,7 @@ def contract_summary(args: Args) -> str:
 
 
 def _build_environment(args: Args) -> Ros2DualEnvironment:
+    effective_max_delta = _effective_max_action_delta(args)
     action_adapter = EefXyz3dActionAdapter()
     backend = Ros2BackendClient(
         bridge_python=args.bridge_python,
@@ -166,7 +192,7 @@ def _build_environment(args: Args) -> Ros2DualEnvironment:
         max_episode_steps=args.num_steps,
         watchdog_timeout=DEFAULT_WATCHDOG_TIMEOUT,
         frame_timeout=DEFAULT_FRAME_TIMEOUT,
-        max_action_delta=args.max_action_delta,
+        max_action_delta=effective_max_delta,
     )
 
 
