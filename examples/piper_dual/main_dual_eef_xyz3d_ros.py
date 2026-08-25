@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 import signal
 import sys
-from typing import Any
+from typing import Any, Literal
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _OPENPI_CLIENT_SRC = _PROJECT_ROOT / "packages/openpi-client/src"
@@ -55,6 +55,7 @@ class Args:
     eef_right_topic: str = DEFAULT_EEF_RIGHT_TOPIC
     eef_left_action_topic: str = DEFAULT_EEF_LEFT_ACTION_TOPIC
     eef_right_action_topic: str = DEFAULT_EEF_RIGHT_ACTION_TOPIC
+    control_stack: Literal["local-ros", "official-ros", "direct-sdk"] = "official-ros"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -83,6 +84,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-tag", type=str, default=Args.run_tag)
     parser.add_argument("--bridge-python", type=Path, default=Args.bridge_python)
     parser.add_argument("--ros2-config", type=Path, default=Args.ros2_config)
+    parser.add_argument(
+        "--control-stack",
+        choices=("local-ros", "official-ros", "direct-sdk"),
+        default=Args.control_stack,
+    )
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=Args.dry_run)
     parser.add_argument("--publish-actions", action="store_true", default=Args.publish_actions)
     parser.add_argument("--max-action-delta", type=float, default=Args.max_action_delta)
@@ -140,6 +146,7 @@ def _build_environment(args: Args) -> Ros2DualEnvironment:
         config=args.ros2_config,
         dry_run=args.dry_run,
         publish_actions=args.publish_actions,
+        control_stack=args.control_stack,
         action_adapter=action_adapter,
         eef_control=True,
         eef_left_topic=args.eef_left_topic,
@@ -152,6 +159,7 @@ def _build_environment(args: Args) -> Ros2DualEnvironment:
         ros2_config=args.ros2_config,
         dry_run=args.dry_run,
         publish_actions=args.publish_actions,
+        control_stack=args.control_stack,
         observation_adapter=EefXyz3dObservationAdapter(task=args.prompt),
         action_adapter=action_adapter,
         prompt=args.prompt,

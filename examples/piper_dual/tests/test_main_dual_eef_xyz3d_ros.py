@@ -24,6 +24,7 @@ def test_parser_defaults_to_safe_xyz3d_contract() -> None:
     assert args.eef_left_action_topic == "/pos_left_cmd"
     assert args.eef_right_action_topic == "/pos_right_cmd"
     assert args.bridge_python == Path("/usr/bin/python3")
+    assert args.control_stack == "official-ros"
 
 
 def test_parser_exposes_xyz3d_topics_and_safety_flags() -> None:
@@ -38,8 +39,16 @@ def test_parser_exposes_xyz3d_topics_and_safety_flags() -> None:
         "--no-dry-run",
         "--publish-actions",
         "--max-action-delta",
+        "--control-stack",
     ):
         assert flag in help_text
+
+
+@pytest.mark.parametrize("control_stack", ["local-ros", "official-ros", "direct-sdk"])
+def test_parser_accepts_control_stack_choices(control_stack: str) -> None:
+    args = main_dual_eef_xyz3d_ros.parse_args(["--control-stack", control_stack])
+
+    assert args.control_stack == control_stack
 
 
 def test_publish_actions_requires_no_dry_run() -> None:
@@ -98,6 +107,7 @@ def test_build_environment_constructs_xyz3d_backend_and_adapters(monkeypatch: py
         eef_right_action_topic="/right_cmd",
         max_action_delta=0.2,
         ros2_config=Path("/tmp/custom_ros2.yaml"),
+        control_stack="local-ros",
     )
     environment = main_dual_eef_xyz3d_ros._build_environment(args)
 
@@ -108,11 +118,13 @@ def test_build_environment_constructs_xyz3d_backend_and_adapters(monkeypatch: py
     assert backend_kwargs["eef_right_topic"] == "/right_pose"
     assert backend_kwargs["eef_left_action_topic"] == "/left_cmd"
     assert backend_kwargs["eef_right_action_topic"] == "/right_cmd"
+    assert backend_kwargs["control_stack"] == "local-ros"
     assert backend_kwargs["action_adapter"].__class__.__name__ == "EefXyz3dActionAdapter"
     env_kwargs = captured["environment"]
     assert env_kwargs["prompt"] == "Stack the cups"
     assert env_kwargs["max_action_delta"] == 0.2
     assert env_kwargs["ros2_config"] == Path("/tmp/custom_ros2.yaml")
+    assert env_kwargs["control_stack"] == "local-ros"
     assert env_kwargs["observation_adapter"].__class__.__name__ == "EefXyz3dObservationAdapter"
     assert env_kwargs["action_adapter"].__class__.__name__ == "EefXyz3dActionAdapter"
 
