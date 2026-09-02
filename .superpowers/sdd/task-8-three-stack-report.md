@@ -61,3 +61,26 @@ Pending.
 - GREEN: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q examples/piper_dual/tests/test_collector_state_machine.py -k 'control_stack or max_sync_error or render_after_save'` -> `4 passed, 9 deselected in 0.18s`.
 - Scope: `examples/piper_dual/collect_data_ros2.py`, `examples/piper_dual/tests/test_collector_state_machine.py`.
 - Safety: dry-run remains the default and `publish_actions` stays false in the focused test path.
+
+## EEF subscription recovery
+- Restore: restored failed-agent bridge/backend/codec files to HEAD before minimal changes.
+- RED backend: source restore against new tests failed: `--include-eef` absent for paired EEF topics and `eef_control=True` left synchronizer `include_eef` false.
+- RED bridge: source restore against new tests failed: joint-only bridge subscribed YAML EEF PoseStamped topics and parser rejected `--include-eef`.
+- GREEN system: `/usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_contract.py examples/piper_dual/tests/test_ros2_bridge_codec.py -q` -> `42 passed in 0.42s`.
+- GREEN venv: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest examples/piper_dual/tests/test_ros2_backend.py -q` -> `26 passed in 4.08s`.
+- Structure: restored `_parse_args`, subscription loops, `_qos_depth`, `_action_publishers`, status latch, and hardware-fault reporting fields in `ros2_bridge_process.py`.
+- Commit: 633431c
+
+
+## Collector finalize alias update
+- RED: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/pytest examples/piper_dual/tests/test_collector_state_machine.py examples/piper_dual/tests/test_collect_data_eef_ros2.py -q` initially failed because pytest plugin autoload pulled in ROS tooling without `lark` in the env, so it was rerun with plugin autoload disabled.
+- GREEN: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/pytest examples/piper_dual/tests/test_collector_state_machine.py examples/piper_dual/tests/test_collect_data_eef_ros2.py -q` -> `18 passed in 0.26s`.
+- Change: `examples/piper_dual/collect_data_ros2.py`, `examples/piper_dual/collect_data_eef_ros2.py`, `examples/piper_dual/tests/test_collector_state_machine.py`, `examples/piper_dual/README.md`.
+- Commit: pending
+
+## EEF collector control-stack forwarding
+- RED: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_collect_data_eef_ros2.py` initially failed because the collector had no `--control-stack` option and `create_controller` did not forward a selected stack.
+- GREEN: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /usr/bin/python3 -m pytest -q examples/piper_dual/tests/test_collect_data_eef_ros2.py` -> `7 passed in 0.16s`.
+- Change: `examples/piper_dual/collect_data_eef_ros2.py`, `examples/piper_dual/tests/test_collect_data_eef_ros2.py`.
+- Safety: focused parser/controller tests only; no live collector, ROS/CAN, hardware, formatter, or broad suite.
+- Commit: pending

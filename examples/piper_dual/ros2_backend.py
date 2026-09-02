@@ -27,6 +27,7 @@ from ros2_protocol import decode_message
 from ros2_protocol import encode_message
 
 BRIDGE_SCRIPT = Path(__file__).resolve().with_name("ros2_bridge_process.py")
+LOCAL_BRIDGE_SCRIPT = Path(__file__).resolve().with_name("ros2_local_bridge_process.py")
 DEFAULT_QUEUE_SIZE = 8
 DEFAULT_SYNC_ERROR = 0.03
 DEFAULT_BUFFER_SECONDS = 2.0
@@ -116,7 +117,10 @@ class Ros2BackendClient:
             return
         if self.dry_run and self.publish_actions_enabled:
             raise ValueError("Unsafe configuration: dry_run=True together with publish_actions=True")
-        args = [str(self.bridge_python), str(BRIDGE_SCRIPT), "--config", str(self.config), "--control-stack", self.control_stack]
+        bridge_script = LOCAL_BRIDGE_SCRIPT if self.control_stack == "local-ros" else BRIDGE_SCRIPT
+        args = [str(self.bridge_python), str(bridge_script), "--config", str(self.config)]
+        if self.control_stack != "local-ros":
+            args.extend(["--control-stack", self.control_stack])
         if self.dry_run:
             args.append("--dry-run")
         if self.publish_actions_enabled:

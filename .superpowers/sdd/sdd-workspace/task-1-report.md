@@ -56,3 +56,9 @@ Implemented Task 1 in `/home/agilex/client/.worktrees/piper-dual-ros2-migration`
 ## Concerns
 - The available default `python` is a conda Python without pytest and reports Python 3.12. The required ROS import smoke test and focused tests were therefore run with `/usr/bin/python3` (Python 3.10), as required by the brief.
 - The ROS bridge implementation imports the requested ROS packages successfully, but hardware/runtime ROS topic behavior was not exercised because the task acceptance only requested focused tests and import smoke testing.
+
+## Review fixes
+- Command: `/usr/bin/python3 -m pytest examples/piper_dual/tests/test_ros2_protocol.py examples/piper_dual/tests/test_ros2_bridge_codec.py -q`
+  - Observed output: `21 passed in 0.27s`
+- Command: `/usr/bin/python3 -m py_compile examples/piper_dual/ros2_protocol.py examples/piper_dual/ros2_bridge_process.py`
+  - Observed output: exit 0, no output

@@ -20,6 +20,8 @@ from streaming_hdf5 import validate_episode
 
 CAMERAS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 SENSORS = CAMERAS + ("puppet_left", "puppet_right", "master_left", "master_right")
+EEF_SENSORS = ("eef_puppet_left", "eef_puppet_right")
+EEF_SENSORS_ALL = SENSORS + EEF_SENSORS
 
 
 def jpeg_bytes(seed: int) -> bytes:
@@ -41,6 +43,30 @@ def frame(index: int, *, timestamp: float | None = None) -> SynchronizedFrame:
         action=(np.arange(14, dtype=np.float32) + 100 + index).astype(np.float32),
         sensor_timestamps={sensor: base_time + sensor_index * 0.001 for sensor_index, sensor in enumerate(SENSORS)},
         sync_error={sensor: sensor_index * 0.001 for sensor_index, sensor in enumerate(SENSORS)},
+    )
+
+def eef_frame(index: int) -> SynchronizedFrame:
+    item = frame(index)
+    base_time = item.timestamp
+    return SynchronizedFrame(
+        timestamp=item.timestamp,
+        images=item.images,
+        state=item.state,
+        action=item.action,
+        sensor_timestamps={
+            **item.sensor_timestamps,
+            "eef_puppet_left": base_time + 0.007,
+            "eef_puppet_right": base_time + 0.008,
+        },
+        sync_error={
+            **item.sync_error,
+            "eef_puppet_left": 0.007,
+            "eef_puppet_right": 0.008,
+        },
+        eef={
+            "puppet_left": np.arange(6, dtype=np.float32) + index,
+            "puppet_right": np.arange(6, dtype=np.float32) + 10 + index,
+        },
     )
 
 
@@ -197,3 +223,76 @@ def test_append_validates_required_frame_shape_and_camera_bytes(tmp_path: Path):
     with pytest.raises(ValueError, match="JPEG bytes"):
         writer.append(malformed)
     writer.abort()
+
+
+def test_eef_writer_round_trips_frame_aligned_pose_and_timing_datasets(tmp_path: Path):
+    final_path = tmp_path / "eef.hdf5"
+    metadata = {
+        "collector": "collect_data_eef_ros2.py",
+        "eef": {"enabled": True, "order": ["x", "y", "z", "roll", "pitch", "yaw"]},
+    }
+    writer = StreamingEpisodeWriter.open(final_path, metadata=metadata, include_eef=True)
+    expected = eef_frame(0)
+
+    writer.append(expected)
+    writer.finalize()
+
+    with h5py.File(final_path, "r") as episode:
+        np.testing.assert_array_equal(episode["/observations/eef/puppet_left"][0], expected.eef["puppet_left"])
+        np.testing.assert_array_equal(episode["/observations/eef/puppet_right"][0], expected.eef["puppet_right"])
+        assert episode["/observations/eef/puppet_left"].shape == (1, 6)
+        assert episode["/observations/eef/puppet_left"].maxshape == (None, 6)
+        assert episode["/observations/eef/puppet_left"].dtype == np.dtype("float32")
+        assert episode["/observations/sensor_timestamps/eef_puppet_left"].shape == (1,)
+        assert episode["/observations/sync_error/eef_puppet_right"].shape == (1,)
+    assert validate_episode(final_path)["errors"] == []
+
+
+def test_ordinary_writer_does_not_create_eef_group(tmp_path: Path):
+    final_path = tmp_path / "ordinary.hdf5"
+    writer = open_writer(final_path)
+    writer.append(frame(0))
+    writer.finalize()
+
+    with h5py.File(final_path, "r") as episode:
+        assert "/observations/eef" not in episode
+
+
+@pytest.mark.parametrize(
+    ("eef", "match"),
+    [
+        (None, "EEF"),
+        ({"puppet_left": np.zeros(6, dtype=np.float32)}, "exactly"),
+        ({"puppet_left": np.zeros(5), "puppet_right": np.zeros(6)}, "six"),
+        ({"puppet_left": np.zeros(6), "puppet_right": np.array([0, 0, 0, 0, 0, np.nan])}, "finite"),
+    ],
+)
+def test_eef_writer_rejects_missing_malformed_or_non_finite_pose(eef, match, tmp_path: Path):
+    writer = StreamingEpisodeWriter.open(
+        tmp_path / "bad-eef.hdf5",
+        metadata={"eef": {"enabled": True}},
+        include_eef=True,
+    )
+    malformed = eef_frame(0)
+    malformed = SynchronizedFrame(
+        timestamp=malformed.timestamp,
+        images=malformed.images,
+        state=malformed.state,
+        action=malformed.action,
+        sensor_timestamps=malformed.sensor_timestamps,
+        sync_error=malformed.sync_error,
+        eef=eef,
+    )
+
+    with pytest.raises(ValueError, match=match):
+        writer.append(malformed)
+    writer.abort()
+
+
+def test_eef_writer_requires_matching_metadata_marker(tmp_path: Path):
+    with pytest.raises(ValueError, match="metadata"):
+        StreamingEpisodeWriter.open(
+            tmp_path / "unmarked.hdf5",
+            metadata={"collector": "collect_data_eef_ros2.py"},
+            include_eef=True,
+        )

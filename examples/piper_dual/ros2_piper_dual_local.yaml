@@ -97,7 +97,7 @@ bridge_contract:
     - joint5
     - joint6
   control:
-    speed_percent: 30
+    speed_percent: 100
     gripper_effort: 0.5
     max_action_delta: 0.05
     status_watchdog_s: 0.5

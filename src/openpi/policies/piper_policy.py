@@ -10,7 +10,7 @@ from openpi import transforms
 def make_piper_example() -> dict:
     """Creates a random input example for the Aloha policy."""
     return {
-        "state": np.ones((7,)),
+        "state": np.ones((14,)),
         "images": {
             "cam_high": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
             "cam_low": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
@@ -100,10 +100,11 @@ class PiperOutputs(transforms.DataTransformFn):
     # If true, this will convert the joint and gripper values from the standard Aloha space to
     # the space used by the pi internal runtime which was used to train the base model.
     adapt_to_pi: bool = False
+    action_dim: int = 14
 
     def __call__(self, data: dict) -> dict:
-        # Only return the first 14 dims.
-        actions = np.asarray(data["actions"][:, :7])
+        # Return the configured number of leading action dimensions.
+        actions = np.asarray(data["actions"][:, : self.action_dim])
         return {"actions": _encode_actions(actions, adapt_to_pi=self.adapt_to_pi)}
 
 

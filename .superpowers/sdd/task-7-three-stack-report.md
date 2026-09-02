@@ -35,3 +35,13 @@ Focused Task 7 only:
 ## Notes
 - No hardware actions were run.
 - No broad suites or formatters were used.
+
+## Corrective fix after review
+- RED: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_run_metadata.py`
+  - Result before fixes: `6 failed, 22 passed in 0.23s`; failures covered non-positive/non-finite fps pre-construction, mismatched/unknown run tags, exact README command blocks, and literal `started_at` placeholder metadata.
+- GREEN: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_run_metadata.py`
+  - Result: `29 passed in 0.21s`
+- GREEN syntax check: `python -m py_compile examples/piper_dual/main_dual.py examples/piper_dual/saver.py examples/piper_dual/run_metadata.py examples/piper_dual/tests/test_main_dual.py examples/piper_dual/tests/test_run_metadata.py`
+  - Result: no output
+- Corrective commit: `e5cf0fc65c1033fc02a54fe1cb29fc29f84b8f75` (`fix: close Task 7 run metadata defects`).
+- Attribution evidence after commit: `git status --short` reports no staged files; the only remaining `examples/piper_dual/main_dual.py` diff is the six user-owned defaults: `action_horizon=30`, `num_steps=8000`, `port=8001`, prompt `Place the red and blue blocks on the wooden board`, `use_async=False`, and `record_mode=False`. The committed baseline remains `10/800/8000/Fold_the_towel/True/True`.

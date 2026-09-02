@@ -109,7 +109,7 @@ class Runtime:
         action_time = time.time()
         self._environment.apply_action(action)
         apply_time = time.time()
-        
+
         for subscriber in self._subscribers:
             subscriber.on_step(observation, action)
 
@@ -118,7 +118,7 @@ class Runtime:
         ):
             self.mark_episode_complete()
         end = time.time()
-        
+
         # print(
         #     f"Timing: obs {obs_time - start:.3f}s, infer {action_time - obs_time:.3f}s, apply {apply_time - action_time:.3f}s, other {end - apply_time:.3f}s"
         # )

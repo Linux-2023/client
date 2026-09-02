@@ -113,7 +113,7 @@ def test_bridge_backend_forwards_control_stack_to_sidecar(tmp_path, monkeypatch)
                 break
         """,
     )
-    monkeypatch.setattr(ros2_backend, "BRIDGE_SCRIPT", bridge)
+    monkeypatch.setattr(ros2_backend, "LOCAL_BRIDGE_SCRIPT", bridge)
     client = Ros2BackendClient(
         bridge_python=Path(sys.executable),
         config=write_config(tmp_path),
@@ -125,8 +125,14 @@ def test_bridge_backend_forwards_control_stack_to_sidecar(tmp_path, monkeypatch)
     client.close()
 
     argv = json.loads(records.read_text(encoding="utf-8"))["argv"]
-    assert "--control-stack" in argv
-    assert argv[argv.index("--control-stack") + 1] == "local-ros"
+    assert "--control-stack" not in argv
+    assert argv[:3] == [str(bridge), "--config", str(write_config(tmp_path))]
+
+
+def test_local_stack_uses_dedicated_legacy_bridge_file() -> None:
+    assert ros2_backend.LOCAL_BRIDGE_SCRIPT.name == "ros2_local_bridge_process.py"
+    assert ros2_backend.LOCAL_BRIDGE_SCRIPT.is_file()
+    assert ros2_backend.LOCAL_BRIDGE_SCRIPT != ros2_backend.BRIDGE_SCRIPT
 
 def test_start_passes_paired_eef_topics_and_enables_eef_synchronizer(tmp_path, monkeypatch):
     records = tmp_path / "eef-records.jsonl"

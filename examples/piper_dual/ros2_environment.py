@@ -49,7 +49,9 @@ class Ros2DualEnvironment(_environment.Environment):
 
         contract = BridgeContract.from_mapping(self._load_config(ros2_config))
         if max_action_delta is None:
-            max_action_delta_value = contract.control.max_action_delta
+            # Preserve the pre-three-stack local behavior: the local stack has
+            # no implicit action-delta gate unless the operator requests one.
+            max_action_delta_value = None if control_stack == "local-ros" else contract.control.max_action_delta
         else:
             max_action_delta_value = float(max_action_delta)
             if not np.isfinite(max_action_delta_value) or max_action_delta_value < 0:

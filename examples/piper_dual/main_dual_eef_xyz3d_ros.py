@@ -37,9 +37,9 @@ DEFAULT_EEF_RIGHT_ACTION_TOPIC = "/pos_right_cmd"
 @dataclass
 class Args:
     out_dir: Path = Path("data/piper_dual_eef_xyz3d/videos")
-    action_horizon: int = 50
+    action_horizon: int = 16
     fps: int = 30
-    actions_during_latency: int = 5
+    actions_during_latency: int = 8
     num_steps: int = 8000
     num_episodes: int = 1
     run_tag: str = ""
@@ -122,11 +122,6 @@ def _effective_max_action_delta(args: Args, contract: BridgeContract | None = No
     requested = float(args.max_action_delta)
     if not math.isfinite(requested) or requested < 0:
         raise ValueError("--max-action-delta must be finite and non-negative")
-    if requested > selected_contract.control.max_action_delta:
-        raise ValueError(
-            "--max-action-delta must be less than or equal to selected config "
-            f"bridge_contract.control.max_action_delta ({selected_contract.control.max_action_delta:g})"
-        )
     return requested
 
 
@@ -152,9 +147,9 @@ def contract_summary(args: Args) -> str:
             f"- action_horizon={args.action_horizon}",
             f"- dry_run={args.dry_run}",
             f"- publish_actions={args.publish_actions}",
-            "- publish-actions requires --no-dry-run",
-            f"- max_action_delta_safety_limit={effective_max_delta:g}",
-            f"- selected_config_max_action_delta={contract.control.max_action_delta:g}",
+            "- control_mode=MOVE L/P selected by PosCmd; mode_feedback is not pre-gated",
+            f"- effective_max_action_delta={effective_max_delta:g}",
+            f"- selected_config_default_max_action_delta={contract.control.max_action_delta:g}",
             f"- eef_observation_topics={args.eef_left_topic}, {args.eef_right_topic}",
             f"- eef_action_topics={args.eef_left_action_topic}, {args.eef_right_action_topic}",
             f"- bridge_python={args.bridge_python}",

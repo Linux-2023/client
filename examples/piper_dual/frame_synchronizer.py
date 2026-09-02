@@ -11,7 +11,9 @@ import numpy as np
 
 IMAGE_SENSORS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 JOINT_SENSORS = ("puppet_left", "puppet_right", "master_left", "master_right")
+EEF_SENSORS = ("eef_puppet_left", "eef_puppet_right")
 REQUIRED_SENSORS = IMAGE_SENSORS + JOINT_SENSORS
+EEF_DIMENSION = 6
 JOINT_DIMENSION = 7
 FRAME_DIMENSION = 14
 
@@ -24,7 +26,7 @@ class SynchronizedFrame:
     action: np.ndarray
     sensor_timestamps: dict[str, float]
     sync_error: dict[str, float]
-
+    eef: dict[str, np.ndarray] | None = None
 
 @dataclass(frozen=True, slots=True)
 class _Sample:
@@ -35,10 +37,12 @@ class _Sample:
 class FrameSynchronizer:
     """Synchronize individual bridge sensor samples into complete observation frames."""
 
-    def __init__(self, max_error: float, max_buffer_seconds: float = 2.0) -> None:
+    def __init__(self, max_error: float, max_buffer_seconds: float = 2.0, *, include_eef: bool = False) -> None:
         self.max_error = self._validate_positive_float(max_error, "max_error")
         self.max_buffer_seconds = self._validate_positive_float(max_buffer_seconds, "max_buffer_seconds")
-        self._buffers: dict[str, deque[_Sample]] = {sensor: deque() for sensor in REQUIRED_SENSORS}
+        self.include_eef = bool(include_eef)
+        self.required_sensors = REQUIRED_SENSORS + EEF_SENSORS if self.include_eef else REQUIRED_SENSORS
+        self._buffers: dict[str, deque[_Sample]] = {sensor: deque() for sensor in self.required_sensors}
         self.accepted_frames = 0
         self.rejected_missing = 0
         self.rejected_stale = 0
@@ -96,7 +100,7 @@ class FrameSynchronizer:
             selected: dict[str, _Sample] = {reference_sensor: reference}
             pending = False
             stale = False
-            for sensor in REQUIRED_SENSORS:
+            for sensor in self.required_sensors:
                 if sensor == reference_sensor:
                     continue
                 sample = self._nearest_sample(sensor, reference.timestamp)
@@ -146,9 +150,15 @@ class FrameSynchronizer:
             self.rejected_invalid += 1
             raise ValueError("Synchronized state and action values must be finite")
 
-        sensor_timestamps = {sensor: selected[sensor].timestamp for sensor in REQUIRED_SENSORS}
-        sync_error = {sensor: selected[sensor].timestamp - reference_timestamp for sensor in REQUIRED_SENSORS}
+        sensor_timestamps = {sensor: selected[sensor].timestamp for sensor in self.required_sensors}
+        sync_error = {sensor: selected[sensor].timestamp - reference_timestamp for sensor in self.required_sensors}
         sync_error[reference_sensor] = 0.0
+        eef = None
+        if self.include_eef:
+            eef = {
+                "puppet_left": np.asarray(selected["eef_puppet_left"].value, dtype=np.float32).copy(),
+                "puppet_right": np.asarray(selected["eef_puppet_right"].value, dtype=np.float32).copy(),
+            }
         return SynchronizedFrame(
             timestamp=reference_timestamp,
             images=images,
@@ -156,6 +166,7 @@ class FrameSynchronizer:
             action=action,
             sensor_timestamps=sensor_timestamps,
             sync_error=sync_error,
+            eef=eef,
         )
 
     def _nearest_sample(self, sensor: str, timestamp: float) -> _Sample | None:
@@ -204,7 +215,21 @@ class FrameSynchronizer:
             return value
 
         if not isinstance(value, np.ndarray):
+            if sensor in EEF_SENSORS:
+                raise ValueError("EEF sensor values must be numpy arrays")
             raise ValueError("joint sensor values must be numpy arrays")
+        if sensor in EEF_SENSORS:
+            if value.ndim != 1:
+                raise ValueError("EEF sensor values must be one-dimensional")
+            if value.shape != (EEF_DIMENSION,):
+                raise ValueError("EEF sensor values must contain exactly six values")
+            if value.dtype.kind not in "fiu":
+                raise ValueError("EEF sensor values must be numeric")
+            values = value.astype(np.float32, copy=False)
+            if not np.isfinite(values).all():
+                raise ValueError("EEF sensor values must be finite")
+            return values
+
         if value.ndim != 1 or value.shape[0] != JOINT_DIMENSION:
             raise ValueError("joint sensor values must contain exactly seven values")
         if value.dtype.kind not in "fiu":

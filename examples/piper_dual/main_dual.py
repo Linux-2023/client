@@ -30,10 +30,10 @@ class Args:
     out_dir: Path = Path("data/piper_dual/videos")
     seed: int = 0
     max_action_horizon: int = 50
-    action_horizon: int = 10
+    action_horizon: int = 30
     fps: int = 30
     actions_during_latency: int = 5
-    num_steps: int = 800
+    num_steps: int = 8000
     num_episodes: int = 1
     run_tag: str = ""
     mode: str = "remote"
@@ -45,19 +45,19 @@ class Args:
     control_stack: Literal["local-ros", "official-ros", "direct-sdk"] | None = None
     max_action_delta: float | None = None
     host: str = "127.0.0.1"
-    port: int = 8000
+    port: int = 8001
     display: bool = False
     high_camera_id: str = "148522073709"
     left_wrist_camera_id: int = 0
     right_wrist_camera_id: int = 8
     left_can_port: str = "can_left"
     right_can_port: str = "can_right"
-    prompt: str = "Fold_the_towel"
-    use_async: bool = True
+    prompt: str = "Place the red and blue blocks on the wooden board"
+    use_async: bool = False
     use_rtc: bool = False
     gripper_norm: bool = True
     tele_mode: bool = False
-    record_mode: bool = True
+    record_mode: bool = False
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

@@ -9,19 +9,31 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import frame_synchronizer as frame_synchronizer_module
 from frame_synchronizer import FrameSynchronizer
 
 
 IMAGE_SENSORS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 JOINT_SENSORS = ("puppet_left", "puppet_right", "master_left", "master_right")
 ALL_SENSORS = IMAGE_SENSORS + JOINT_SENSORS
+EEF_SENSOR_NAMES = ("eef_puppet_left", "eef_puppet_right")
+ALL_SENSORS_WITH_EEF = ALL_SENSORS + EEF_SENSOR_NAMES
 
 
 def joint_values(start: float) -> np.ndarray:
     return np.arange(start, start + 7, dtype=np.float32)
 
+def eef_values(start: float) -> np.ndarray:
+    return np.arange(start, start + 6, dtype=np.float32)
 
-def push_complete_frame(sync: FrameSynchronizer, timestamp: float, *, offsets: dict[str, float] | None = None) -> None:
+
+def push_complete_frame(
+    sync: FrameSynchronizer,
+    timestamp: float,
+    *,
+    offsets: dict[str, float] | None = None,
+    include_eef: bool = False,
+) -> None:
     offsets = offsets or {}
     sync.push("cam_high", timestamp + offsets.get("cam_high", 0.0), b"high")
     sync.push("cam_left_wrist", timestamp + offsets.get("cam_left_wrist", 0.0), b"left")
@@ -30,6 +42,9 @@ def push_complete_frame(sync: FrameSynchronizer, timestamp: float, *, offsets: d
     sync.push("puppet_right", timestamp + offsets.get("puppet_right", 0.0), joint_values(10))
     sync.push("master_left", timestamp + offsets.get("master_left", 0.0), joint_values(20))
     sync.push("master_right", timestamp + offsets.get("master_right", 0.0), joint_values(30))
+    if include_eef:
+        sync.push("eef_puppet_left", timestamp + offsets.get("eef_puppet_left", 0.0), eef_values(40))
+        sync.push("eef_puppet_right", timestamp + offsets.get("eef_puppet_right", 0.0), eef_values(50))
 
 
 def test_nearest_neighbor_matching_within_thirty_milliseconds():
@@ -210,7 +225,7 @@ def test_state_action_concatenation_order_float32_shapes_and_finite_values():
         ("cam_high", 1.0, "not-bytes", "image"),
         ("puppet_left", 1.0, np.zeros(6, dtype=np.float32), "seven"),
         ("puppet_left", 1.0, np.array([0.0] * 6 + [math.nan], dtype=np.float32), "finite"),
-        ("puppet_left", 1.0, [0.0] * 7, "numpy"),
+        ("puppet_left", 1.0, [0.0] * 7, "joint sensor values must be numpy arrays"),
     ],
 )
 def test_unknown_sensors_and_invalid_timestamps_or_values_are_rejected(sensor, timestamp, value, match):
@@ -218,5 +233,117 @@ def test_unknown_sensors_and_invalid_timestamps_or_values_are_rejected(sensor, t
 
     with pytest.raises(ValueError, match=match):
         sync.push(sensor, timestamp, value)
+
+    assert sync.rejected_invalid == 1
+
+
+def test_default_mode_preserves_required_sensors_and_rejects_eef_streams():
+    assert frame_synchronizer_module.EEF_SENSORS == EEF_SENSOR_NAMES
+    assert frame_synchronizer_module.EEF_DIMENSION == 6
+
+    sync = FrameSynchronizer(max_error=0.03)
+
+    assert sync.required_sensors == ALL_SENSORS
+    assert set(sync.buffered_counts) == set(ALL_SENSORS)
+    with pytest.raises(ValueError, match="unknown sensor"):
+        sync.push("eef_puppet_left", 1.0, eef_values(0))
+    assert sync.rejected_invalid == 1
+
+    push_complete_frame(sync, 1.0)
+    frame = sync.try_sync()
+
+    assert frame is not None
+    assert frame.eef is None
+    assert frame.state.shape == (14,)
+    assert frame.action.shape == (14,)
+
+
+def test_eef_mode_aligns_pose_streams_and_emits_synchronized_metadata():
+    sync = FrameSynchronizer(max_error=0.03, include_eef=True)
+
+    assert sync.required_sensors == ALL_SENSORS_WITH_EEF
+    push_complete_frame(sync, 10.0, offsets={"master_right": -0.005})
+    sync.push("eef_puppet_left", 9.980, eef_values(40))
+    sync.push("eef_puppet_left", 10.012, eef_values(60))
+    sync.push("eef_puppet_right", 9.985, eef_values(80))
+
+    frame = sync.try_sync()
+
+    assert frame is not None
+    assert frame.eef is not None
+    assert set(frame.sensor_timestamps) == set(ALL_SENSORS_WITH_EEF)
+    assert set(frame.sync_error) == set(ALL_SENSORS_WITH_EEF)
+    np.testing.assert_array_equal(frame.eef["puppet_left"], eef_values(60))
+    np.testing.assert_array_equal(frame.eef["puppet_right"], eef_values(80))
+    assert frame.eef["puppet_left"].shape == (6,)
+    assert frame.eef["puppet_right"].shape == (6,)
+    assert np.isfinite(frame.eef["puppet_left"]).all()
+    assert np.isfinite(frame.eef["puppet_right"]).all()
+    assert frame.sensor_timestamps["eef_puppet_left"] == pytest.approx(10.012)
+    assert frame.sensor_timestamps["eef_puppet_right"] == pytest.approx(9.985)
+    assert frame.sync_error["eef_puppet_left"] == pytest.approx(0.012)
+    assert frame.sync_error["eef_puppet_right"] == pytest.approx(-0.015)
+    assert frame.state.shape == (14,)
+    assert frame.action.shape == (14,)
+    assert sync.accepted_frames == 1
+
+
+def test_eef_mode_accepts_pose_samples_on_exact_error_boundary():
+    sync = FrameSynchronizer(max_error=0.03, include_eef=True)
+    push_complete_frame(
+        sync,
+        11.0,
+        include_eef=True,
+        offsets={"eef_puppet_left": -0.03, "eef_puppet_right": 0.03},
+    )
+
+    frame = sync.try_sync()
+
+    assert frame is not None
+    assert frame.eef is not None
+    assert frame.sync_error["eef_puppet_left"] == pytest.approx(-0.03)
+    assert frame.sync_error["eef_puppet_right"] == pytest.approx(0.03)
+
+
+def test_eef_mode_waits_for_missing_then_emits_late_stream_and_rejects_stale_reference():
+    late = FrameSynchronizer(max_error=0.03, include_eef=True)
+    push_complete_frame(late, 12.0)
+    late.push("eef_puppet_left", 12.0, eef_values(40))
+
+    assert late.try_sync() is None
+    assert late.rejected_missing == 1
+
+    late.push("eef_puppet_right", 12.025, eef_values(50))
+    frame = late.try_sync()
+
+    assert frame is not None
+    assert frame.eef is not None
+    assert frame.sync_error["eef_puppet_right"] == pytest.approx(0.025)
+
+    stale = FrameSynchronizer(max_error=0.03, include_eef=True)
+    push_complete_frame(stale, 13.0)
+    stale.push("eef_puppet_left", 13.0, eef_values(40))
+    stale.push("eef_puppet_right", 13.031, eef_values(50))
+
+    assert stale.try_sync() is None
+    assert stale.rejected_stale == 1
+    assert stale.accepted_frames == 0
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ([0.0] * 6, "numpy"),
+        (np.zeros((1, 6), dtype=np.float32), "one-dimensional"),
+        (np.zeros(5, dtype=np.float32), "six"),
+        (np.array(["x"] * 6), "numeric"),
+        (np.array([0.0] * 5 + [math.inf], dtype=np.float32), "finite"),
+    ],
+)
+def test_invalid_eef_values_are_rejected(value, match):
+    sync = FrameSynchronizer(max_error=0.03, include_eef=True)
+
+    with pytest.raises(ValueError, match=match):
+        sync.push("eef_puppet_left", 1.0, value)
 
     assert sync.rejected_invalid == 1

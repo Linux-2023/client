@@ -418,6 +418,20 @@ def load_jax_model_and_print_keys(checkpoint_dir: str):
     metadata = checkpointer.metadata(f"{checkpoint_dir}/params")
     print(utils.array_tree_to_info(metadata))
 
+def _copy_checkpoint_assets(checkpoint_dir: str | pathlib.Path, output_path: str | pathlib.Path) -> None:
+    checkpoint_dir = pathlib.Path(checkpoint_dir)
+    assets_source = checkpoint_dir / "assets"
+    if not assets_source.exists():
+        assets_source = checkpoint_dir.parent / "assets"
+    if not assets_source.exists():
+        return
+
+    assets_dest = pathlib.Path(output_path) / "assets"
+    if assets_dest.exists():
+        shutil.rmtree(assets_dest)
+    shutil.copytree(assets_source, assets_dest)
+
+
 
 def convert_pi0_checkpoint(
     checkpoint_dir: str, precision: str, output_path: str, model_config: openpi.models.pi0_config.Pi0Config
@@ -532,13 +546,9 @@ def convert_pi0_checkpoint(
     # Save model weights as SafeTensors using save_model to handle tied weights
     safetensors.torch.save_model(pi0_model, os.path.join(output_path, "model.safetensors"))
 
-    # Copy assets folder if it exists
-    assets_source = pathlib.Path(checkpoint_dir).parent / "assets"
-    if assets_source.exists():
-        assets_dest = pathlib.Path(output_path) / "assets"
-        if assets_dest.exists():
-            shutil.rmtree(assets_dest)
-        shutil.copytree(assets_source, assets_dest)
+    # Hub snapshots keep assets inside the checkpoint. Older training layouts
+    # stored them next to the numbered checkpoint directory.
+    _copy_checkpoint_assets(checkpoint_dir, output_path)
 
     # Save config as JSON for reference
     config_dict = {

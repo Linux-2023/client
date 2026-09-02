@@ -168,6 +168,26 @@ def test_constructor_respects_explicit_valid_max_action_delta_override() -> None
     assert env._max_action_delta == pytest.approx(0.2)
 
 
+def test_local_stack_has_no_implicit_action_delta_limit() -> None:
+    env = Ros2DualEnvironment(
+        backend=FakeBackend(),
+        ros2_config=profile_for("local-ros").config_path,
+        control_stack="local-ros",
+    )
+
+    assert env._max_action_delta is None
+
+
+def test_official_stack_keeps_configured_action_delta_default() -> None:
+    env = Ros2DualEnvironment(
+        backend=FakeBackend(),
+        ros2_config=profile_for("official-ros").config_path,
+        control_stack="official-ros",
+    )
+
+    assert env._max_action_delta == pytest.approx(0.05)
+
+
 @pytest.mark.parametrize("max_action_delta", [np.nan, np.inf, -np.inf])
 def test_constructor_rejects_nonfinite_max_action_delta(max_action_delta: float) -> None:
     with pytest.raises(ValueError, match="finite non-negative"):

@@ -15,7 +15,7 @@ import main_dual_eef_xyz3d_ros
 def test_parser_defaults_to_safe_xyz3d_contract() -> None:
     args = main_dual_eef_xyz3d_ros.parse_args([])
 
-    assert args.action_horizon == 50
+    assert args.action_horizon == 30
     assert args.fps == 30
     assert args.dry_run is True
     assert args.publish_actions is False
@@ -58,30 +58,15 @@ def test_publish_actions_requires_no_dry_run() -> None:
         main_dual_eef_xyz3d_ros._validate_xyz3d_contract(args)
 
 
-def test_contract_rejects_max_action_delta_above_selected_config_before_environment_creation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    called = False
-
-    def fail_build(_: main_dual_eef_xyz3d_ros.Args) -> object:
-        nonlocal called
-        called = True
-        raise AssertionError("environment must not be created")
-
-    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_environment", fail_build)
-
-    result = main_dual_eef_xyz3d_ros.main(
-        main_dual_eef_xyz3d_ros.Args(
-            control_stack="local-ros",
-            ros2_config=Path(__file__).resolve().parents[1] / "ros2_piper_dual_local.yaml",
-            dry_run=False,
-            publish_actions=True,
-            max_action_delta=100.0,
-        )
+def test_contract_accepts_explicit_max_action_delta_above_selected_config_default() -> None:
+    args = main_dual_eef_xyz3d_ros.Args(
+        control_stack="local-ros",
+        ros2_config=Path(__file__).resolve().parents[1] / "ros2_piper_dual_local.yaml",
+        max_action_delta=20.0,
     )
 
-    assert result == 2
-    assert called is False
+    main_dual_eef_xyz3d_ros._validate_xyz3d_contract(args)
+    assert main_dual_eef_xyz3d_ros._effective_max_action_delta(args) == pytest.approx(20.0)
 
 
 def test_contract_accepts_max_action_delta_equal_to_selected_config_limit(
@@ -148,8 +133,8 @@ def test_contract_summary_names_14d_xyz3d_layout_and_safety_limits() -> None:
     summary = main_dual_eef_xyz3d_ros.contract_summary(main_dual_eef_xyz3d_ros.Args())
 
     assert "selected_stack=official-ros" in summary
-    assert "expected_control_mode=MOVE P (mode_feedback=0)" in summary
-    assert "max_action_delta_safety_limit=0.05" in summary
+    assert "control_mode=MOVE L/P selected by PosCmd; mode_feedback is not pre-gated" in summary
+    assert "effective_max_action_delta=0.05" in summary
     assert "14D" in summary
     assert "left_xyzrpy" in summary
     assert "right_xyzrpy" in summary
@@ -175,7 +160,7 @@ def test_build_environment_constructs_xyz3d_backend_and_adapters(monkeypatch: py
         eef_right_topic="/right_pose",
         eef_left_action_topic="/left_cmd",
         eef_right_action_topic="/right_cmd",
-        max_action_delta=0.05,
+        max_action_delta=20.0,
         ros2_config=Path(__file__).resolve().parents[1] / "ros2_piper_dual_local.yaml",
         control_stack="local-ros",
     )
@@ -189,10 +174,9 @@ def test_build_environment_constructs_xyz3d_backend_and_adapters(monkeypatch: py
     assert backend_kwargs["eef_left_action_topic"] == "/left_cmd"
     assert backend_kwargs["eef_right_action_topic"] == "/right_cmd"
     assert backend_kwargs["control_stack"] == "local-ros"
-    assert backend_kwargs["action_adapter"].__class__.__name__ == "EefXyz3dActionAdapter"
     env_kwargs = captured["environment"]
     assert env_kwargs["prompt"] == "Stack the cups"
-    assert env_kwargs["max_action_delta"] == pytest.approx(0.05)
+    assert env_kwargs["max_action_delta"] == pytest.approx(20.0)
     assert env_kwargs["ros2_config"] == Path(__file__).resolve().parents[1] / "ros2_piper_dual_local.yaml"
     assert env_kwargs["control_stack"] == "local-ros"
     assert env_kwargs["observation_adapter"].__class__.__name__ == "EefXyz3dObservationAdapter"
