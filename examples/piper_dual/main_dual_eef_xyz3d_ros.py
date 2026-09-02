@@ -37,7 +37,7 @@ DEFAULT_EEF_RIGHT_ACTION_TOPIC = "/pos_right_cmd"
 @dataclass
 class Args:
     out_dir: Path = Path("data/piper_dual_eef_xyz3d/videos")
-    action_horizon: int = 16
+    action_horizon: int = 20
     fps: int = 30
     actions_during_latency: int = 8
     num_steps: int = 8000
@@ -50,7 +50,9 @@ class Args:
     max_action_delta: float | None = None
     host: str = "127.0.0.1"
     port: int = 8000
-    prompt: str = "Stack_the_paper_cups_together."
+    # prompt: str = "Stack_the_paper_cups_together."
+    # prompt: str = "Fold_the_towel."
+    prompt: str = "Beat_the_drum_three_times."
     use_async: bool = True
     use_rtc: bool = True
     eef_left_topic: str = DEFAULT_EEF_LEFT_TOPIC
