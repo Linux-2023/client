@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import logging
 import math
 from pathlib import Path
@@ -37,9 +37,13 @@ DEFAULT_EEF_RIGHT_ACTION_TOPIC = "/pos_right_cmd"
 @dataclass
 class Args:
     out_dir: Path = Path("data/piper_dual_eef_xyz3d/videos")
-    action_horizon: int = 30
+    trace_dir: Path | None = None
+    # TODO
+    # action_horizon: int = 40
+    # action_horizon: int = 30
+    action_horizon: int = 20
     fps: int = 30
-    actions_during_latency: int = 8
+    actions_during_latency: int = 12
     num_steps: int = 8000
     num_episodes: int = 1
     run_tag: str = ""
@@ -50,12 +54,14 @@ class Args:
     max_action_delta: float | None = None
     host: str = "127.0.0.1"
     port: int = 8000
+    # TODO
     prompt: str = "Stack_the_paper_cups_together."
     # prompt: str = "Fold_the_towel."
     # prompt: str = "Beat_the_drum_three_times."
     # prompt: str = "Weigh_the_apple."
+    # prompt: str = "Put the block in the drawer."
     use_async: bool = True
-    use_rtc: bool = False
+    use_rtc: bool = True
     eef_left_topic: str = DEFAULT_EEF_LEFT_TOPIC
     eef_right_topic: str = DEFAULT_EEF_RIGHT_TOPIC
     eef_left_action_topic: str = DEFAULT_EEF_LEFT_ACTION_TOPIC
@@ -69,6 +75,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--out-dir", type=Path, default=Args.out_dir)
+    parser.add_argument("--trace-dir", type=Path, default=Args.trace_dir, help="Record EEF submissions and chunk metadata without overwriting existing client trace files")
     parser.add_argument(
         "--action-horizon",
         "--action_horizon",
@@ -206,26 +213,60 @@ def _build_policy(args: Args) -> Any:
             fps=args.fps,
             actions_during_latency=args.actions_during_latency,
             use_rtc=args.use_rtc,
+            trace_enabled=args.trace_dir is not None,
         )
     return action_chunk_broker.ActionChunkBroker(
         policy=base_policy,
         action_horizon=args.action_horizon,
         fps=args.fps,
+        trace_enabled=args.trace_dir is not None,
     )
 
 
-def _build_runtime(args: Args, environment: Ros2DualEnvironment, policy: Any) -> Any:
+def _build_runtime(args: Args, environment: Ros2DualEnvironment, policy: Any, *, recorder: Any | None = None) -> Any:
     from openpi_client.runtime import runtime
     from openpi_client.runtime.agents import policy_agent
     import saver
 
+    subscribers = [saver.VideoSaver(args.out_dir)]
+    if recorder is not None:
+        # Record accepted submissions before video I/O can fail. Both subscribers
+        # retain the existing runtime on_step(observation, action) contract.
+        subscribers.insert(0, recorder)
+
     return runtime.Runtime(
         environment=environment,
         agent=policy_agent.PolicyAgent(policy=policy),
-        subscribers=[saver.VideoSaver(args.out_dir)],
+        subscribers=subscribers,
         max_hz=args.fps,
         num_episodes=args.num_episodes,
     )
+
+
+def _trace_metadata(args: Args) -> dict[str, Any]:
+    return {
+        "args": {name: str(value) if isinstance(value, Path) else value for name, value in asdict(args).items()},
+        "layout": [f"{arm}_{axis}" for arm in ("left", "right") for axis in ("x", "y", "z", "roll", "pitch", "yaw", "gripper")],
+        "units": {"xyz": "m", "rpy": "rad", "gripper": "m"},
+        "clocks": {
+            "timestamp_ns": "time.time_ns(): host wall clock, nanoseconds since Unix epoch; may be adjusted",
+            "monotonic_ns": "time.monotonic_ns(): host monotonic clock, nanoseconds; same-host alignment only",
+            "selected_timestamp_ns": "Broker selection uses time.time_ns() before returning the action",
+            "selected_monotonic_ns": "Broker selection uses time.monotonic_ns() before returning the action",
+        },
+        "semantics": {
+            "action_submitted": "Recorded after environment.apply_action returns; submission accepted, NOT physical execution or confirmed CAN dispatch. Dry-run can submit without publishing.",
+            "action": "14D policy EEF action returned by the broker and submitted to apply_action, before backend conversion",
+            "observation_state": "14D EEF state in the observation obtained before action selection; not joint feedback or a simultaneous tracking-error measurement",
+            "episode": "Zero-based runtime episode index",
+            "step": "Zero-based action submission index, increasing across episodes; boundary records use the next action index",
+            "chunk_id": "Zero-based adopted chunk index, reset with broker.reset() for each episode",
+            "chunk_step": "Index in the original full returned chunk, including any skipped prefix",
+            "chunk_boundary": "First action selected from the adopted chunk, including when a prefix was skipped",
+            "skipped_steps": "Prefix length skipped when this chunk was adopted; constant for that chunk",
+            "inference_ms": "Observed client policy-call duration in milliseconds for this chunk, not server-only inference time",
+        },
+    }
 
 
 def main(args: Args | argparse.Namespace | None = None) -> int:
@@ -242,28 +283,39 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
     print(contract_summary(args))
     environment: Ros2DualEnvironment | None = None
     runtime_instance: Any | None = None
+    recorder: Any | None = None
+    exit_reason = "error"
 
     def signal_handler(sig: int, frame: Any) -> None:
         del sig, frame
         print("\nStopping XYZ3D EEF ROS 2 deployment...")
-        if environment is not None:
-            environment.close()
+        # All resources, including buffered trace data, close in the common finally.
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     try:
+        if args.trace_dir is not None:
+            from eef_trace_recorder import EefTraceRecorder
+
+            recorder = EefTraceRecorder(args.trace_dir, _trace_metadata(args))
         print("\nInitializing XYZ3D EEF ROS 2 environment...")
         environment = _build_environment(args)
         print("XYZ3D EEF ROS 2 environment initialized")
         print("\nConnecting to policy server...")
         policy = _build_policy(args)
         print("Policy server connected")
-        runtime_instance = _build_runtime(args, environment, policy)
+        runtime_instance = (
+            _build_runtime(args, environment, policy, recorder=recorder)
+            if recorder is not None
+            else _build_runtime(args, environment, policy)
+        )
         print(f"\nTask: {args.prompt}\n\nRunning XYZ3D EEF policy...")
         runtime_instance.run()
+        exit_reason = "completed"
         return 0
     except KeyboardInterrupt:
+        exit_reason = "interrupted"
         return 130
     except Exception as exc:  # noqa: BLE001
         print(f"\nRuntime error: {exc}", file=sys.stderr)
@@ -272,10 +324,16 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
         traceback.print_exc()
         return 1
     finally:
-        if runtime_instance is not None and hasattr(runtime_instance, "close"):
-            runtime_instance.close()
-        if environment is not None:
-            environment.close()
+        try:
+            if runtime_instance is not None and hasattr(runtime_instance, "close"):
+                runtime_instance.close()
+        finally:
+            try:
+                if environment is not None:
+                    environment.close()
+            finally:
+                if recorder is not None:
+                    recorder.close(reason=exit_reason)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ import main_dual_eef_xyz3d_ros
 def test_parser_defaults_to_safe_xyz3d_contract() -> None:
     args = main_dual_eef_xyz3d_ros.parse_args([])
 
-    assert args.action_horizon == 30
+    assert args.action_horizon == main_dual_eef_xyz3d_ros.Args.action_horizon
     assert args.fps == 30
     assert args.dry_run is True
     assert args.publish_actions is False
@@ -199,3 +199,209 @@ def test_main_rejects_unsafe_publish_before_environment_creation(monkeypatch: py
 
     assert result == 2
     assert called is False
+
+
+def test_parser_trace_is_opt_in(tmp_path: Path) -> None:
+    assert main_dual_eef_xyz3d_ros.parse_args([]).trace_dir is None
+    assert main_dual_eef_xyz3d_ros.parse_args(["--trace-dir", str(tmp_path)]).trace_dir == tmp_path
+
+
+@pytest.mark.parametrize("existing", ["client.jsonl", "client_metadata.json"])
+def test_main_trace_refuses_overwrite_before_environment_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: str
+) -> None:
+    (tmp_path / existing).write_text("preserved")
+    constructed = []
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_environment", lambda args: constructed.append(args))
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros.signal, "signal", lambda *args: None)
+    assert main_dual_eef_xyz3d_ros.main(main_dual_eef_xyz3d_ros.Args(trace_dir=tmp_path)) == 1
+    assert not constructed
+    assert (tmp_path / existing).read_text() == "preserved"
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError, KeyboardInterrupt])
+def test_main_trace_metadata_precedes_environment_and_flushes_on_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type | None
+) -> None:
+    import json
+    import numpy as np
+    from eef_trace_recorder import EefTraceRecorder
+
+    observed = {}
+    original_close = EefTraceRecorder.close
+
+    def close(recorder, *args, **kwargs):
+        observed["recorder_closed"] = True
+        return original_close(recorder, *args, **kwargs)
+
+    class Environment:
+        def close(self):
+            observed["environment_closed"] = True
+
+    def build_environment(args):
+        metadata = json.loads((tmp_path / "client_metadata.json").read_text())
+        assert metadata["args"]["trace_dir"] == str(tmp_path)
+        assert metadata["args"]["action_horizon"] == args.action_horizon
+        assert metadata["args"]["use_rtc"] == args.use_rtc
+        assert metadata["args"]["host"] == args.host
+        assert metadata["args"]["port"] == args.port
+        assert metadata["args"]["prompt"] == args.prompt
+        assert metadata["units"]["xyz"] == "m"
+        assert metadata["units"]["rpy"] == "rad"
+        assert "time.time_ns" in metadata["clocks"]["timestamp_ns"]
+        assert "time.monotonic_ns" in metadata["clocks"]["monotonic_ns"]
+        return Environment()
+
+    def build_runtime(args, environment, policy, *, recorder=None):
+        assert recorder is not None
+
+        class Runtime:
+            def run(self):
+                recorder.on_episode_start()
+                recorder.on_step({"state": np.zeros(14)}, {"actions": np.ones(14)})
+                if failure is not None:
+                    raise failure("test runtime stopped")
+                recorder.on_episode_end()
+
+        return Runtime()
+
+    monkeypatch.setattr(EefTraceRecorder, "close", close)
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_environment", build_environment)
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_policy", lambda args: object())
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_runtime", build_runtime)
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros.signal, "signal", lambda *args: None)
+    result = main_dual_eef_xyz3d_ros.main(main_dual_eef_xyz3d_ros.Args(trace_dir=tmp_path))
+    assert result == (0 if failure is None else 130 if failure is KeyboardInterrupt else 1)
+    assert observed == {"environment_closed": True, "recorder_closed": True}
+    records = [json.loads(line) for line in (tmp_path / "client.jsonl").read_text().splitlines()]
+    assert [record["event"] for record in records] == ["episode_start", "action_submitted", "episode_end"]
+    if failure is not None:
+        assert records[-1]["reason"] == ("interrupted" if failure is KeyboardInterrupt else "error")
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+def test_main_trace_closes_when_environment_construction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type
+) -> None:
+    from eef_trace_recorder import EefTraceRecorder
+
+    closed = []
+    original_close = EefTraceRecorder.close
+
+    def close(recorder, *args, **kwargs):
+        closed.append(recorder)
+        return original_close(recorder, *args, **kwargs)
+
+    def build_environment(args):
+        raise failure("construction stopped")
+
+    monkeypatch.setattr(EefTraceRecorder, "close", close)
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_environment", build_environment)
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros.signal, "signal", lambda *args: None)
+    result = main_dual_eef_xyz3d_ros.main(main_dual_eef_xyz3d_ros.Args(trace_dir=tmp_path))
+    assert result == (130 if failure is KeyboardInterrupt else 1)
+    assert len(closed) == 1
+
+
+def test_build_runtime_records_only_after_action_submission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from types import SimpleNamespace
+    import numpy as np
+    from eef_trace_recorder import EefTraceRecorder
+
+    class Environment:
+        reject = False
+
+        def get_observation(self):
+            return {"state": np.zeros(14)}
+
+        def apply_action(self, action):
+            assert not (tmp_path / "client.jsonl").read_text().count("action_submitted")
+            if self.reject:
+                raise ValueError("submission rejected")
+
+        def is_episode_complete(self):
+            return True
+
+    recorder = EefTraceRecorder(tmp_path, {}, flush_every=1)
+    monkeypatch.setitem(sys.modules, "saver", SimpleNamespace(VideoSaver=lambda path: object()))
+    environment = Environment()
+    policy = SimpleNamespace(infer=lambda obs: {"actions": np.ones(14), "_chunk_trace": {"chunk_id": 9}})
+    runtime = main_dual_eef_xyz3d_ros._build_runtime(
+        main_dual_eef_xyz3d_ros.Args(trace_dir=tmp_path), environment, policy, recorder=recorder
+    )
+    assert recorder in runtime._subscribers
+    runtime._subscribers = [recorder]
+    recorder.on_episode_start()
+    environment.reject = True
+    with pytest.raises(ValueError, match="submission rejected"):
+        runtime._step()
+    environment.reject = False
+    runtime._step()
+    recorder.close()
+    records = [json.loads(line) for line in (tmp_path / "client.jsonl").read_text().splitlines()]
+    submitted = [record for record in records if record["event"] == "action_submitted"]
+    assert len(submitted) == 1
+    assert submitted[0]["_chunk_trace"] == {"chunk_id": 9}
+
+
+@pytest.mark.parametrize("use_async,use_rtc", [(False, False), (False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("traced", [False, True])
+def test_build_policy_trace_wiring_preserves_all_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_async: bool, use_rtc: bool, traced: bool
+) -> None:
+    from types import SimpleNamespace
+    import numpy as np
+    import openpi_client
+
+    policy = SimpleNamespace(infer=lambda obs: {"actions": np.zeros((50, 14))}, reset=lambda: None)
+    transport = SimpleNamespace(WebsocketClientPolicy=lambda **kwargs: policy)
+    monkeypatch.setitem(sys.modules, "openpi_client.websocket_client_policy", transport)
+    monkeypatch.setattr(openpi_client, "websocket_client_policy", transport, raising=False)
+    args = main_dual_eef_xyz3d_ros.Args(
+        use_async=use_async, use_rtc=use_rtc, trace_dir=tmp_path if traced else None
+    )
+    broker = main_dual_eef_xyz3d_ros._build_policy(args)
+    result = broker.infer({"state": np.zeros(14)})
+    assert ("_chunk_trace" in result) is traced
+    if traced:
+        trace = result["_chunk_trace"]
+        assert trace["use_rtc"] is (use_async and use_rtc)
+        assert trace["configured_delay_steps"] == (args.actions_during_latency if use_async else 0)
+        assert trace["action_horizon"] == args.action_horizon
+
+
+@pytest.mark.parametrize("closing", ["runtime", "environment"])
+def test_main_trace_flushes_even_when_other_cleanup_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, closing: str
+) -> None:
+    import json
+    import numpy as np
+
+    class Environment:
+        def close(self):
+            if closing == "environment":
+                raise RuntimeError("environment close failed")
+
+    def build_runtime(args, environment, policy, *, recorder=None):
+        class Runtime:
+            def run(self):
+                recorder.on_episode_start()
+                recorder.on_step({"state": np.zeros(14)}, {"actions": np.ones(14)})
+
+            def close(self):
+                if closing == "runtime":
+                    raise RuntimeError("runtime close failed")
+
+        return Runtime()
+
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_environment", lambda args: Environment())
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_policy", lambda args: object())
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_runtime", build_runtime)
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros.signal, "signal", lambda *args: None)
+    with pytest.raises(RuntimeError, match=f"{closing} close failed"):
+        main_dual_eef_xyz3d_ros.main(main_dual_eef_xyz3d_ros.Args(trace_dir=tmp_path))
+    records = [json.loads(line) for line in (tmp_path / "client.jsonl").read_text().splitlines()]
+    assert [record["event"] for record in records] == ["episode_start", "action_submitted", "episode_end"]

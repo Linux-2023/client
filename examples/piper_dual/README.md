@@ -540,6 +540,10 @@ python scripts/serve_policy.py \
   --policy.dir=/home/agilex/checkpoints/pi05_piper_dual_stack_cups_eef_xyz3d_jax_step10000_pytorch
 ```
 
+XYZ3D 服务端会保留客户端传入的 `rtc_obs`，将其中绝对 EEF 前缀按 action 统计归一化、补齐到模型维度，再交给 RTC 引导；不会转换成关节增量或相对位姿。基础 XYZ3D 和 `_100` 配置共用该适配器。没有 `rtc_obs` 的首次推理或关闭 RTC 的请求仍走普通采样。
+
+更新服务端适配器代码后，需要先停止推理客户端，再停止并用原 checkpoint/config 命令重启 `scripts/serve_policy.py`，仅重启客户端不会让旧服务加载新代码。随后客户端使用 `--use-async --use-rtc`；已有默认值也可继续使用。PyTorch 服务端从带前缀的后续请求开始输出 `overlap part error:`，可辅助确认进入了 RTC 分支，但该数值不是机械臂跟踪误差或平滑性保证。首次启用真实 RTC 后重新记录短时运行，检查推理耗时、chunk 边界和动作跳变；无需修改模型权重或重建 ROS 驱动。
+
 先运行 dry-run 检查同步帧、14D 策略输出和动作变化：
 
 ```bash
@@ -559,6 +563,65 @@ python examples/piper_dual/main_dual_eef_xyz3d_ros.py \
 ```
 
 确认 dry-run 输出、动作限幅和急停后，才可把 `--dry-run` 替换成 `--no-dry-run --publish-actions`。默认 EEF observation/action topic、故障锁定和 cleanup 行为与 rot6d EEF 入口一致。
+
+#### 7. XYZ3D RTC 轨迹诊断与驱动精度回退
+
+客户端记录默认关闭。给 XYZ3D 推理命令追加 `--trace-dir /home/agilex/eef_traces/run_sdk_001` 后，会在构造机器人环境前独占创建 `client_metadata.json` 和 `client.jsonl`；已有同名文件时拒绝启动，不会覆盖旧实验。每次实验使用新目录。`client.jsonl` 的 `action_submitted` 是 `environment.apply_action` 返回后的策略动作，不代表机械臂已经执行；dry-run 也会记录，因此必须结合 metadata 中的发布开关和 ROS 记录判断。
+
+RTC `_chunk_trace` 包含 `chunk_id`、原始 chunk 内的 `chunk_step`、`chunk_boundary`、`skipped_steps`、选择动作时的双时间戳、推理耗时和 RTC 参数。它在选择该动作时确定，不会被异步线程之后的 chunk 切换覆盖。`observation_state` 是动作选择前的 EEF 观测，不是同步的关节跟踪误差。
+
+本地驱动 `/home/agilex/piper_ros/src/piper/piper/piper_ctrl_single_node.py` 的 `eef_position_quantization` 启动参数支持：
+
+- `sdk`（默认）：`round(position_m * 1_000_000)`，保留 SDK 的 0.001 mm 指令分辨率；不是机械臂实际定位精度承诺。
+- `legacy_mm`：严格恢复原先 `round(position_m * 1000) * 1000` 的整毫米取整，便于对照或回退。
+- `eef_command_trace:=true`：发布左右 `std_msgs/msg/String` 诊断话题，默认关闭。不改 MOVE P、速度、姿态或夹爪控制参数。
+
+这两个参数在启动时读取。只修改源码不会更新已运行的进程。需要更新安装包时，在系统 ROS Python 环境中执行 `colcon build --packages-select piper`；它只构建安装，不负责停止或重启驱动。安全停机后，由操作者停止原控制 launch，确认没有重复 CAN owner，再重新启动。以下示例禁止自动使能，后续使能沿用已验证的人工流程：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agilex/piper_ros/install/setup.bash
+ros2 launch piper start_two_piper.launch.py \
+  can_left_port:=can_left can_right_port:=can_right \
+  auto_enable:=false \
+  eef_position_quantization:=sdk eef_command_trace:=true
+```
+
+恢复旧取整方式：安全停止推理和驱动，再用同样的启动命令把 `eef_position_quantization:=sdk` 改为 `eef_position_quantization:=legacy_mm`。保持其他参数不变并使用新的记录目录；不要依赖运行时 `ros2 param set` 切换。完全关闭诊断则使用 `eef_command_trace:=false`，并去掉客户端 `--trace-dir`。
+
+先在独立终端启动只读 ROS 采集器，再运行推理。采集器不调用机械臂驱动、不连接 CAN、不发布控制指令、不使能机械臂：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/agilex/piper_ros/install/setup.bash
+cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+/usr/bin/python3 examples/piper_dual/record_eef_ros2_trace.py \
+  --output-dir /home/agilex/eef_traces/run_sdk_001
+```
+
+看到 `READY` 后，在原推理命令末尾追加同一个目录：
+
+```text
+--trace-dir /home/agilex/eef_traces/run_sdk_001
+```
+
+结束时先停止推理，等待反馈到达后再 Ctrl-C 停止采集器；它会 flush 并输出各路计数和缺失流。也可加 `--duration 120` 限时录制，但时长包含等待推理启动的时间。
+
+目录中的 `ros.jsonl` 同时记录八路数据：
+
+| 话题 | 记录内容 |
+| --- | --- |
+| `/pos_left_cmd`、`/pos_right_cmd` | 原始 XYZ+RPY、夹爪、mode 字段；单位 m/rad/m |
+| `/piper_left_ctrl_node/eef_command_trace`、`/piper_right_ctrl_node/eef_command_trace` | 驱动收到的输入、精度模式、实际传给 `EndPoseCtrl` 的六个整数、序号与接收时间；SDK XYZ 单位 0.001 mm，角度单位 0.001 度 |
+| `/puppet/joint_left`、`/puppet/joint_right` | 原始关节位置、速度、effort、名称和 header 时间戳 |
+| `/puppet/end_pose_left`、`/puppet/end_pose_right` | 原始末端位置、四元数、header 时间戳 |
+
+诊断中的 `dispatched=true` 只表示调用了 `EndPoseCtrl`，不是 SDK/CAN 成功或实际运动确认；false 时 `sdk_pose` 是计算出的候选值，未下发。关闭使能时也可收到此诊断。若没发现诊断发布者或结束时没有有效诊断消息，采集器会明确警告，不能视为完整捕获。
+
+同机数据可用 `timestamp_ns`（Unix wall clock）和 `monotonic_ns` 对齐；带 header 的反馈额外保留 `source_timestamp_ns`，生产者时钟可能不同。PosCmd 本身无 header/唯一编号，只能结合时序和数值匹配，不能虚构跨层一一对应。订阅 QoS 为 best-effort，兼容可靠及 best-effort 发布者；结束计数不证明 DDS 零丢包。诊断序号可辅助发现缺口。原始 EEF 与关节数据必须分别分析，不可直接相减。
+
+`--max-action-delta` 仍是原有 14D 原始数值相邻差的拒绝阈值，不是平滑器；XYZ 使用米、RPY 使用弧度，`20` 不是 20 mm。采集功能不会改变该阈值或任何现有安全检查。
+
 ### 六、文件结构
 
 ```

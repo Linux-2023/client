@@ -51,6 +51,9 @@ class PiperEefXyz3dInputs(transforms.DataTransformFn):
             if actions.shape[-1] != 14:
                 raise ValueError(f"Expected 14D XYZ3D actions, got shape {actions.shape}")
             result["actions"] = actions.copy()
+        if "rtc_obs" in data:
+            # EEF prefixes are absolute poses; shared transforms normalize and pad them.
+            result["rtc_obs"] = data["rtc_obs"].copy()
         for key in ("prompt", "episode_index", "frame_index"):
             if key in data:
                 result[key] = data[key]

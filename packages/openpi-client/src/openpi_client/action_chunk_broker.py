@@ -15,6 +15,44 @@ from openpi_client import base_policy as _base_policy
 import time
 
 
+class _ChunkTrace:
+    """Track adopted chunks separately from policy tensors; callers hold their broker lock."""
+
+    def __init__(self, action_horizon: int, configured_delay_steps: int, use_rtc: bool):
+        self.action_horizon = action_horizon
+        self.configured_delay_steps = configured_delay_steps
+        self.use_rtc = use_rtc
+        self.reset()
+
+    def reset(self) -> None:
+        self.chunk_id = -1
+        self.skipped_steps = 0
+        self.inference_ms = 0.0
+        self.boundary = False
+
+    def adopt(self, skipped_steps: int, inference_ms: float) -> None:
+        self.chunk_id += 1
+        self.skipped_steps = skipped_steps
+        self.inference_ms = inference_ms
+        self.boundary = True
+
+    def select(self, chunk_step: int) -> Dict:
+        trace = {
+            "chunk_id": self.chunk_id,
+            "chunk_step": chunk_step,
+            "chunk_boundary": self.boundary,
+            "selected_timestamp_ns": time.time_ns(),
+            "selected_monotonic_ns": time.monotonic_ns(),
+            "use_rtc": self.use_rtc,
+            "action_horizon": self.action_horizon,
+            "configured_delay_steps": self.configured_delay_steps,
+            "skipped_steps": self.skipped_steps,
+            "inference_ms": self.inference_ms,
+        }
+        self.boundary = False
+        return trace
+
+
 class ActionChunkBroker(_base_policy.BasePolicy):
     """Wraps a policy to return action chunks one-at-a-time.
 
@@ -28,11 +66,12 @@ class ActionChunkBroker(_base_policy.BasePolicy):
     conditioning (without requiring full RTC mode).
     """
 
-    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int, fps: int = 30):
+    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int, fps: int = 30, *, trace_enabled: bool = False):
         self._policy = policy
         self._action_horizon = action_horizon
         self._cur_step: int = 0
         self._fps = fps
+        self._trace = _ChunkTrace(action_horizon, 0, False) if trace_enabled else None
 
         self._last_results: Dict[str, np.ndarray] | None = None
         self._prev_full_actions: np.ndarray | None = None  # Previous action chunk for GPR
@@ -43,7 +82,11 @@ class ActionChunkBroker(_base_policy.BasePolicy):
             # Inject prev_action for GPR noise conditioning (if available)
             if self._prev_full_actions is not None:
                 obs = {**obs, "prev_action": self._prev_full_actions}
+            if self._trace is not None:
+                trace_start_ns = time.monotonic_ns()
             self._last_results = self._policy.infer(obs)
+            if self._trace is not None:
+                self._trace.adopt(0, (time.monotonic_ns() - trace_start_ns) / 1_000_000)
 
             # Save this chunk's full actions for next inference call
             if "actions" in self._last_results and isinstance(self._last_results["actions"], np.ndarray):
@@ -58,6 +101,8 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                 return x
 
         results = tree.map_structure(slicer, self._last_results)
+        if self._trace is not None:
+            results["_chunk_trace"] = self._trace.select(self._cur_step)
         self._cur_step += 1
 
         if self._cur_step >= self._action_horizon:
@@ -71,6 +116,8 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         self._last_results = None
         self._prev_full_actions = None
         self._cur_step = 0
+        if self._trace is not None:
+            self._trace.reset()
 
 
 class ActionChunkBroker_RTC(_base_policy.BasePolicy):
@@ -86,7 +133,7 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
     _instances = []  # Class-level list to track all instances
     _atexit_registered = False  # Flag to ensure atexit is only registered once
 
-    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int, fps: int = 30, actions_during_latency: int = 1, use_rtc: bool = True):
+    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int, fps: int = 30, actions_during_latency: int = 1, use_rtc: bool = True, *, trace_enabled: bool = False):
         self._policy = policy
         self._max_horizon = 50
         self._action_dim = 14
@@ -109,6 +156,7 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
         self._should_stop = False
 
         self._use_rtc = use_rtc
+        self._trace = _ChunkTrace(action_horizon, actions_during_latency, use_rtc) if trace_enabled else None
 
         # Full previous chunk actions for GPR conditioning (non-RTC async mode).
         # Mirrors ActionChunkBroker._prev_full_actions.
@@ -564,6 +612,8 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
                 self._last_results = new_results #smooth_results #tree.map_structure(slicer_excute, new_results)
                 self._prev_obs = obs.copy() # for delta action culation
                 self._cur_step = self._actions_during_latency_realtime
+                if self._trace is not None:
+                    self._trace.adopt(self._cur_step, infer_ms)
             a_end = time.time()
             print(f"infer time: {infer_ms} ms, async time: {(a_end - a_start) * 1000.0} ms")
 
@@ -604,6 +654,8 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
                 # Calculate average latency and actions during latency
                 self._update_latency_stats()
                 self._cur_step = 0
+                if self._trace is not None:
+                    self._trace.adopt(0, infer_ms)
                 
                 # def slicer_prev(x):
                 #     if isinstance(x, np.ndarray):
@@ -631,6 +683,8 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
                 else:
                     return x
             results = tree.map_structure(slicer, self._last_results)
+            if self._trace is not None:
+                results["_chunk_trace"] = self._trace.select(self._cur_step)
             
             # Calculate action variation for logging (position change only)
             if self._prev_returned_action is not None:
@@ -727,6 +781,8 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
             self._action_history.clear()
             self._chunk_boundaries.clear()
             self._chunk_action_records.clear()
+            if self._trace is not None:
+                self._trace.reset()
     
 class ActionChunkBroker_RTC_Fake(_base_policy.BasePolicy):
     """Wraps a policy to return action chunks one-at-a-time with async inference.

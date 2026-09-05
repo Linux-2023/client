@@ -954,6 +954,75 @@ _CONFIGS = [
         fsdp_devices=4,
     ),
     TrainConfig(
+        name="pi05_piper_dual_fold_towel_eef_xyz3d_50",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_fold_towel_eef_xyz3d_100",
+            base_config=DataConfig(prompt_from_task=True, episodes=tuple(range(50))),
+            default_prompt="Fold the towel.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/pfs/pfs-7jnepv/lgd/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=30_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_fold_towel_eef_xyz3d_10",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_fold_towel_eef_xyz3d_100",
+            base_config=DataConfig(prompt_from_task=True, episodes=tuple(range(10))),
+            default_prompt="Fold the towel.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/pfs/pfs-7jnepv/lgd/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=30_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_fold_towel_eef_xyz3d_20",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_fold_towel_eef_xyz3d_100",
+            base_config=DataConfig(prompt_from_task=True, episodes=tuple(range(20))),
+            default_prompt="Fold the towel.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/pfs/pfs-7jnepv/lgd/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=30_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
         name="pi05_piper_dual_beat_drum_eef_xyz3d_100",
         model=pi0_config.Pi0Config(
             pi05=True,
