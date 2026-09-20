@@ -32,6 +32,11 @@ DEFAULT_EEF_LEFT_TOPIC = "/puppet/end_pose_left"
 DEFAULT_EEF_RIGHT_TOPIC = "/puppet/end_pose_right"
 DEFAULT_EEF_LEFT_ACTION_TOPIC = "/pos_left_cmd"
 DEFAULT_EEF_RIGHT_ACTION_TOPIC = "/pos_right_cmd"
+EEF_ACTION_NAMES = tuple(
+    f"{arm}_{axis}"
+    for arm in ("left", "right")
+    for axis in ("x", "y", "z", "roll", "pitch", "yaw", "gripper")
+)
 
 
 @dataclass
@@ -52,14 +57,18 @@ class Args:
     dry_run: bool = True
     publish_actions: bool = False
     max_action_delta: float | None = None
+    max_position_delta: float | None = None
+    max_orientation_delta: float | None = None
+    max_gripper_delta: float | None = None
     host: str = "127.0.0.1"
     port: int = 8000
     # TODO
-    prompt: str = "Stack_the_paper_cups_together."
-    # prompt: str = "Fold_the_towel."
+    # prompt: str = "Stack_the_paper_cups_together."
+    prompt: str = "Fold_the_towel."
     # prompt: str = "Beat_the_drum_three_times."
     # prompt: str = "Weigh_the_apple."
-    # prompt: str = "Put the block in the drawer."
+    # prompt: str = "Put_the_block_in_the_drawer."
+    # prompt: str = "Clean_the_table"
     use_async: bool = True
     use_rtc: bool = True
     eef_left_topic: str = DEFAULT_EEF_LEFT_TOPIC
@@ -104,6 +113,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=Args.dry_run)
     parser.add_argument("--publish-actions", action="store_true", default=Args.publish_actions)
     parser.add_argument("--max-action-delta", type=float, default=Args.max_action_delta)
+    parser.add_argument("--max-position-delta", type=float, default=Args.max_position_delta)
+    parser.add_argument("--max-orientation-delta", type=float, default=Args.max_orientation_delta)
+    parser.add_argument("--max-gripper-delta", type=float, default=Args.max_gripper_delta)
     parser.add_argument("--host", type=str, default=Args.host)
     parser.add_argument("--port", type=int, default=Args.port)
     parser.add_argument("--prompt", type=str, default=Args.prompt)
@@ -138,16 +150,35 @@ def _effective_max_action_delta(args: Args, contract: BridgeContract | None = No
 def _validate_xyz3d_contract(args: Args) -> None:
     if args.publish_actions and args.dry_run:
         raise ValueError("--publish-actions requires --no-dry-run")
-    _effective_max_action_delta(args)
+    _effective_action_delta_limits(args)
     if not args.eef_left_topic or not args.eef_right_topic:
         raise ValueError("EEF observation topics must both be non-empty")
     if not args.eef_left_action_topic or not args.eef_right_action_topic:
         raise ValueError("EEF action topics must both be non-empty")
 
 
+def _effective_action_delta_limits(args: Args) -> tuple[float, ...]:
+    fallback = _effective_max_action_delta(args)
+    requested = {
+        "position": fallback if args.max_position_delta is None else float(args.max_position_delta),
+        "orientation": fallback if args.max_orientation_delta is None else float(args.max_orientation_delta),
+        "gripper": fallback if args.max_gripper_delta is None else float(args.max_gripper_delta),
+    }
+    for name, value in requested.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"--max-{name}-delta must be finite and non-negative")
+    per_arm = (
+        requested["position"], requested["position"], requested["position"],
+        requested["orientation"], requested["orientation"], requested["orientation"],
+        requested["gripper"],
+    )
+    return per_arm + per_arm
+
+
 def contract_summary(args: Args) -> str:
     contract = _selected_bridge_contract(args)
     effective_max_delta = _effective_max_action_delta(args, contract)
+    delta_limits = _effective_action_delta_limits(args)
     return "\n".join(
         [
             "ROS 2 XYZ3D EEF deployment contract:",
@@ -159,6 +190,9 @@ def contract_summary(args: Args) -> str:
             f"- publish_actions={args.publish_actions}",
             "- control_mode=MOVE L/P selected by PosCmd; mode_feedback is not pre-gated",
             f"- effective_max_action_delta={effective_max_delta:g}",
+            f"- effective_position_delta_limit={delta_limits[0]:g} m",
+            f"- effective_orientation_delta_limit={delta_limits[3]:g} rad",
+            f"- effective_gripper_delta_limit={delta_limits[6]:g} m",
             f"- selected_config_default_max_action_delta={contract.control.max_action_delta:g}",
             f"- eef_observation_topics={args.eef_left_topic}, {args.eef_right_topic}",
             f"- eef_action_topics={args.eef_left_action_topic}, {args.eef_right_action_topic}",
@@ -171,6 +205,7 @@ def contract_summary(args: Args) -> str:
 
 def _build_environment(args: Args) -> Ros2DualEnvironment:
     effective_max_delta = _effective_max_action_delta(args)
+    delta_limits = _effective_action_delta_limits(args)
     action_adapter = EefXyz3dActionAdapter()
     backend = Ros2BackendClient(
         bridge_python=args.bridge_python,
@@ -198,6 +233,8 @@ def _build_environment(args: Args) -> Ros2DualEnvironment:
         watchdog_timeout=DEFAULT_WATCHDOG_TIMEOUT,
         frame_timeout=DEFAULT_FRAME_TIMEOUT,
         max_action_delta=effective_max_delta,
+        action_delta_limits=delta_limits,
+        action_names=EEF_ACTION_NAMES,
     )
 
 
@@ -214,6 +251,7 @@ def _build_policy(args: Args) -> Any:
             actions_during_latency=args.actions_during_latency,
             use_rtc=args.use_rtc,
             trace_enabled=args.trace_dir is not None,
+            handoff_blend_steps=args.actions_during_latency,
         )
     return action_chunk_broker.ActionChunkBroker(
         policy=base_policy,
@@ -226,21 +264,24 @@ def _build_policy(args: Args) -> Any:
 def _build_runtime(args: Args, environment: Ros2DualEnvironment, policy: Any, *, recorder: Any | None = None) -> Any:
     from openpi_client.runtime import runtime
     from openpi_client.runtime.agents import policy_agent
-    import saver
+    from tshape_video_saver import TShapeVideoSaver
 
-    subscribers = [saver.VideoSaver(args.out_dir)]
+    video_recorder = TShapeVideoSaver(args.out_dir, fps=args.fps)
+    subscribers = [video_recorder]
     if recorder is not None:
         # Record accepted submissions before video I/O can fail. Both subscribers
         # retain the existing runtime on_step(observation, action) contract.
         subscribers.insert(0, recorder)
 
-    return runtime.Runtime(
+    instance = runtime.Runtime(
         environment=environment,
         agent=policy_agent.PolicyAgent(policy=policy),
         subscribers=subscribers,
         max_hz=args.fps,
         num_episodes=args.num_episodes,
     )
+    instance.video_recorder = video_recorder
+    return instance
 
 
 def _trace_metadata(args: Args) -> dict[str, Any]:
@@ -305,6 +346,9 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
         print("\nConnecting to policy server...")
         policy = _build_policy(args)
         print("Policy server connected")
+        if recorder is not None:
+            get_metadata = getattr(policy, "get_server_metadata", None)
+            recorder.record_server_metadata(get_metadata() if callable(get_metadata) else {})
         runtime_instance = (
             _build_runtime(args, environment, policy, recorder=recorder)
             if recorder is not None
@@ -332,8 +376,13 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
                 if environment is not None:
                     environment.close()
             finally:
-                if recorder is not None:
-                    recorder.close(reason=exit_reason)
+                try:
+                    video_recorder = getattr(runtime_instance, "video_recorder", None)
+                    if video_recorder is not None:
+                        video_recorder.close()
+                finally:
+                    if recorder is not None:
+                        recorder.close(reason=exit_reason)
 
 
 if __name__ == "__main__":

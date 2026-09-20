@@ -32,6 +32,38 @@ class ChunkPolicy:
 @pytest.mark.parametrize(
     "broker_class", [action_chunk_broker.ActionChunkBroker, action_chunk_broker.ActionChunkBroker_RTC]
 )
+def test_brokers_delegate_server_metadata_without_inference(broker_class: type) -> None:
+    class ServerPolicy(ChunkPolicy):
+        metadata = {
+            "rtc_orientation": {"mode": "so3"},
+            "policy_config": "pi05_piper_dual_stack_cups_eef_xyz3d",
+            "checkpoint_dir": "/checkpoints/xyz3d",
+        }
+
+        def get_server_metadata(self) -> dict:
+            return self.metadata
+
+    policy = ServerPolicy()
+    broker = broker_class(policy, action_horizon=3)
+    assert broker.get_server_metadata() == policy.metadata
+    policy.metadata = {"rtc_orientation": {"mode": "wrapped-rpy"}}
+    assert broker.get_server_metadata() == policy.metadata
+    assert policy.calls == 0
+
+
+@pytest.mark.parametrize(
+    "broker_class", [action_chunk_broker.ActionChunkBroker, action_chunk_broker.ActionChunkBroker_RTC]
+)
+def test_brokers_without_server_metadata_return_empty_dict(broker_class: type) -> None:
+    policy = ChunkPolicy()
+    broker = broker_class(policy, action_horizon=3)
+    assert broker.get_server_metadata() == {}
+    assert policy.calls == 0
+
+
+@pytest.mark.parametrize(
+    "broker_class", [action_chunk_broker.ActionChunkBroker, action_chunk_broker.ActionChunkBroker_RTC]
+)
 def test_chunk_trace_is_off_by_default(broker_class: type) -> None:
     broker = broker_class(ChunkPolicy(), action_horizon=3)
     assert "_chunk_trace" not in broker.infer({"state": np.zeros(14)})
@@ -99,3 +131,38 @@ def test_async_trace_stays_with_selected_action_across_skipped_handoff(use_rtc: 
     assert reset_record["_chunk_trace"]["chunk_id"] == 0
     assert reset_record["_chunk_trace"]["chunk_step"] == 0
     assert reset_record["_chunk_trace"]["chunk_boundary"] is True
+
+
+def test_async_broker_holds_final_chunk_target_while_slow_inference_is_pending() -> None:
+    policy = ChunkPolicy()
+    policy.block = True
+    broker = action_chunk_broker.ActionChunkBroker_RTC(
+        policy, action_horizon=3, actions_during_latency=2, use_rtc=True, trace_enabled=True
+    )
+    try:
+        records = [broker.infer({"state": np.zeros(14)}) for _ in range(55)]
+        assert policy.entered.wait(timeout=5)
+        assert records[-1]["actions"][0] == 49 * 14
+        assert records[-1]["_chunk_trace"]["chunk_step"] == 49
+    finally:
+        policy.release.set()
+        if broker._inference_thread is not None:
+            broker._inference_thread.join(timeout=5)
+
+
+def test_async_broker_blends_new_chunk_handoff_with_wrapped_rpy() -> None:
+    broker = action_chunk_broker.ActionChunkBroker_RTC(
+        ChunkPolicy(), action_horizon=3, actions_during_latency=2, handoff_blend_steps=2
+    )
+    broker._prev_returned_action = {"actions": np.zeros(14, dtype=np.float64)}
+    actions = np.ones((50, 14), dtype=np.float64)
+    actions[:, 5] = 2 * np.pi - 0.2
+
+    blended = broker._blend_handoff({"actions": actions}, start_step=2)["actions"]
+
+    assert blended[2, 0] == pytest.approx(0.5)
+    assert blended[3, 0] == pytest.approx(1.0)
+    assert blended[2, 5] == pytest.approx(-0.1)
+    assert blended[3, 5] == pytest.approx(-0.2)
+    np.testing.assert_array_equal(blended[4], actions[4])
+    np.testing.assert_array_equal(actions[:, 0], np.ones(50))

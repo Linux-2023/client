@@ -138,13 +138,32 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    if data_config.image_keys is not None:
+        unknown = set(data_config.image_keys) - set(dataset_meta.camera_keys)
+        if unknown:
+            raise ValueError(f"Unknown image camera keys: {sorted(unknown)}")
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         episodes=data_config.episodes,
+        video_backend="pyav" if dataset_meta.video_keys else None,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
     )
+    if data_config.image_keys is not None:
+        excluded = [key for key in dataset_meta.image_keys if key not in data_config.image_keys]
+        if excluded:
+            # HF decodes Image features before running its per-item transform.
+            # Dropping columns here avoids decoding unused cameras, not just masking them later.
+            dataset.hf_dataset = dataset.hf_dataset.remove_columns(excluded)
+        excluded_videos = set(dataset.meta.video_keys) - set(data_config.image_keys)
+        if excluded_videos:
+            # Video queries enumerate metadata, not the parquet image columns.
+            # Replace the in-memory mapping without changing source metadata.
+            dataset.meta.info = {
+                **dataset.meta.info,
+                "features": {key: value for key, value in dataset.meta.features.items() if key not in excluded_videos},
+            }
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])

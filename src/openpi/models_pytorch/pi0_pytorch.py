@@ -377,7 +377,7 @@ class PI0Pytorch(nn.Module):
         return F.mse_loss(u_t, v_t, reduction="none")
 
     @torch.no_grad()
-    def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
+    def sample_actions(self, device, observation, noise=None, num_steps=10, *, rtc_orientation_guidance=None) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = observation.state.shape[0]
         if noise is None:
@@ -454,6 +454,7 @@ class PI0Pytorch(nn.Module):
                     num_steps=num_steps,
                     mask_schedule="exp",
                     original_denoise_step_partial=denoise_step_partial_call,
+                    rtc_orientation_guidance=rtc_orientation_guidance,
                 )
             
             # Euler step - use new tensor assignment instead of in-place operation
@@ -474,7 +475,8 @@ class PI0Pytorch(nn.Module):
         num_steps,
         mask_schedule,
         original_denoise_step_partial,
-
+        *,
+        rtc_orientation_guidance=None,
     ):
         tau = 1 - time
 
@@ -527,14 +529,21 @@ class PI0Pytorch(nn.Module):
             .unsqueeze(-1)
         )
 
-        with torch.enable_grad():
-            v_t = original_denoise_step_partial(x_t)
-            x_t.requires_grad_(True)
+        if rtc_orientation_guidance is None:
+            with torch.enable_grad():
+                v_t = original_denoise_step_partial(x_t)
+                x_t.requires_grad_(True)
 
-            x1_t = x_t - time * v_t  # noqa: N806
-            err = (prev_chunk_left_over - x1_t) * weights
-            grad_outputs = err.clone().detach()
-            correction = torch.autograd.grad(x1_t, x_t, grad_outputs, retain_graph=False)[0]
+                x1_t = x_t - time * v_t  # noqa: N806
+                err = (prev_chunk_left_over - x1_t) * weights
+                grad_outputs = err.clone().detach()
+                correction = torch.autograd.grad(x1_t, x_t, grad_outputs, retain_graph=False)[0]
+        else:
+            # Geometry-only guidance: never retain a backward graph through the network.
+            with torch.no_grad():
+                v_t = original_denoise_step_partial(x_t)
+                x1_t = x_t - time * v_t
+            correction = rtc_orientation_guidance.correction(x1_t, prev_chunk_left_over, weights).to(x_t.dtype)
 
         max_guidance_weight = torch.as_tensor(num_steps)
         tau_tensor = torch.as_tensor(tau)
@@ -551,7 +560,8 @@ class PI0Pytorch(nn.Module):
             result = result.squeeze(0)
             correction = correction.squeeze(0)
             x1_t = x1_t.squeeze(0)
-            err = err.squeeze(0)
+            if rtc_orientation_guidance is None:
+                err = err.squeeze(0)
 
         return result
 

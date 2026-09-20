@@ -2,6 +2,7 @@ import dataclasses
 import enum
 import logging
 import socket
+from typing import Literal
 
 import tyro
 
@@ -53,6 +54,10 @@ class Args:
     # Record the policy's behavior for debugging.
     record: bool = False
 
+    # Select server-side RTC orientation guidance; new schemes require XYZ+RPY PyTorch policies.
+    # Legacy is the unchanged comparison default.
+    rtc_orientation_mode: Literal["legacy", "wrapped-rpy", "so3"] = "legacy"
+
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
@@ -65,7 +70,7 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     ),
     EnvMode.ALOHA_SIM: Checkpoint(
         config="pi0_aloha_sim",
-        dir="gs://openpi-assets/checkpoints/pi0_aloha_sim", #"checkpoints/openpi/openpi-assets/checkpoints/pi0_aloha_sim_pytorch", #
+        dir="gs://openpi-assets/checkpoints/pi0_aloha_sim",  # "checkpoints/openpi/openpi-assets/checkpoints/pi0_aloha_sim_pytorch", #
     ),
     EnvMode.DROID: Checkpoint(
         config="pi05_droid",
@@ -75,12 +80,10 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
         config="pi05_libero",
         dir="gs://openpi-assets/checkpoints/pi05_libero",
     ),
-
     EnvMode.PIPER: Checkpoint(
         config="pi05_piper_pick_cube",
         dir="checkpoints/pi05_GraspAnything/19999_torch/",
     ),
-
     EnvMode.DATASET: Checkpoint(
         config="pi05_flexiv_pose_train",
         dir="checkpoints/pi05_flexiv_pose_train/exp_flexiv_pickandplace_pose/19999_torch/",
@@ -88,11 +91,16 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
 }
 
 
-def create_default_policy(env: EnvMode, *, default_prompt: str | None = None) -> _policy.Policy:
+def create_default_policy(
+    env: EnvMode, *, default_prompt: str | None = None, rtc_orientation_mode: str = "legacy"
+) -> _policy.Policy:
     """Create a default policy for the given environment."""
     if checkpoint := DEFAULT_CHECKPOINT.get(env):
         return _policy_config.create_trained_policy(
-            _config.get_config(checkpoint.config), checkpoint.dir, default_prompt=default_prompt
+            _config.get_config(checkpoint.config),
+            checkpoint.dir,
+            default_prompt=default_prompt,
+            rtc_orientation_mode=rtc_orientation_mode,
         )
     raise ValueError(f"Unsupported environment mode: {env}")
 
@@ -102,10 +110,15 @@ def create_policy(args: Args) -> _policy.Policy:
     match args.policy:
         case Checkpoint():
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                _config.get_config(args.policy.config),
+                args.policy.dir,
+                default_prompt=args.default_prompt,
+                rtc_orientation_mode=args.rtc_orientation_mode,
             )
         case Default():
-            return create_default_policy(args.env, default_prompt=args.default_prompt)
+            return create_default_policy(
+                args.env, default_prompt=args.default_prompt, rtc_orientation_mode=args.rtc_orientation_mode
+            )
 
 
 def main(args: Args) -> None:

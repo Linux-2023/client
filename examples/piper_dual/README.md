@@ -622,6 +622,39 @@ cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
 
 `--max-action-delta` 仍是原有 14D 原始数值相邻差的拒绝阈值，不是平滑器；XYZ 使用米、RPY 使用弧度，`20` 不是 20 mm。采集功能不会改变该阈值或任何现有安全检查。
 
+#### 8. RTC 姿态误差双方案 A/B 实测
+
+服务端新增 `--rtc-orientation-mode`，必须放在 `policy:checkpoint` 前面。默认 `legacy` 保持原公式，便于回退和对照；需要显式选择新方案：
+
+| 模式 | 姿态误差 | 限制 |
+| --- | --- | --- |
+| `legacy` | 归一化 RPY 普通向量差 | 不理解角度周期，仅作为原实现对照 |
+| `wrapped-rpy`（方案一） | 用 checkpoint action 统计还原弧度差，`atan2(sin(delta),cos(delta))` 后换回归一化单位 | 处理逐轴 2π 跨界，不解决耦合欧拉角等价表示或奇异性 |
+| `so3`（方案二） | RPY 转四元数，对最短旋转角的平方损失求物理 RPY 梯度，再除以归一化比例 | 损失尊重完整旋转等价性；更新仍使用预测 RPY 坐标，在万向锁处退化；恰好 π 时方向不唯一 |
+
+两种新模式只作用于双臂 RPY 六个维度，XYZ、夹爪、padding、RTC 时间权重及执行调度不变。它们都不反向传播整个去噪网络，SO(3) 只对小规模姿态几何计算求导。仅支持 PyTorch + `LeRobotPiperEefXyz3dDataConfig` 的绝对 14D XYZ+RPY checkpoint；错误配置或无效姿态归一化统计会报错，不会静默切换方案。无需重新训练、转换权重或重建 ROS 驱动。它们不是最终输出滤波器，不能保证消除模型原始错误或 RTC 权重为零处的姿态尖峰。
+
+先停止客户端，再停止原模型服务，按方案一启动（checkpoint/config 必须与任务匹配）：
+
+```bash
+cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+source .venv/bin/activate
+python scripts/serve_policy.py \
+  --port=8000 \
+  --rtc-orientation-mode wrapped-rpy \
+  policy:checkpoint \
+  --policy.config=pi05_piper_dual_stack_cups_eef_xyz3d_100 \
+  --policy.dir=/home/agilex/formal_expriments/PyToch_checkpoints/pi05_piper_dual_stack_cups_eef_xyz3d_100_step30000_pytorch
+```
+
+方案二使用同一命令，仅把 `wrapped-rpy` 改为 `so3`。回退时改为 `legacy`。每次切换必须重启服务，不能仅重启客户端；不要同时启动两个占用同一端口的服务。
+
+每段实验先启动只读采集器，等待 `READY`，然后运行原 XYZ3D 客户端。采集器 `--output-dir` 与客户端 `--trace-dir` 使用同一个新目录，例如方案一 `/home/agilex/eef_traces/run_wrapped_rpy_001`，方案二 `/home/agilex/eef_traces/run_so3_001`。保留 `--use-async --use-rtc --fps 30 --action-horizon 20 --actions-during-latency 12`，同任务、同 checkpoint、尽量一致的初始场景。先 dry-run 用独立目录确认，再做人工看护下的短时实测；不要同时调整速度、动作限幅或其他控制参数。需要完整 SDK 参数时，在安全启动驱动时设置 `eef_command_trace:=true`。
+
+客户端连接服务后，在 `client.jsonl` 首部即时 flush 一条 `server_metadata` 事件，保存服务端报告的 `rtc_orientation.mode`、`policy_config`、`checkpoint_dir`，以及新方案采用的姿态索引、归一化比例、偏移和梯度语义。初始 `client_metadata.json` 保持独占且不重写。空的服务端 metadata 表示未知来源，不能推断成 legacy；目录名也不是实际方案证据。后续按服务端 provenance、真实姿态角差、chunk 边界和耗时比较，不把 SDK 调用或目标跳变当作机械臂已经执行。
+
+现有服务端 `overlap part error:` 仍打印归一化动作的普通向量差，未改成旋转距离。等价角度在新模式下可以保留不同数值分支，因此不要用该日志的大小比较三种模式优劣；应使用记录姿态之间的 SO(3) 角差、实测关节响应、任务结果及延迟。SO(3) 模式也未改变模型输出的 RPY 表示，不能保证在欧拉角奇异位形或所有模型异常上都优于周期角度方案。
+
 ### 六、文件结构
 
 ```
@@ -656,3 +689,31 @@ examples/piper_dual/
    - 确认从臂已上电，主臂已断电（部署时）
    - 检查 `tele_mode` 参数设置
    - 重启机械臂后重新运行 CAN 激活脚本
+
+### XYZ3D 推理的 T 形调试录像（2026-09-20）
+
+`main_dual_eef_xyz3d_ros.py` 默认将当前客户端使用的三路同步观测写到
+`--out-dir`：上方整幅主视角，下方左腕/右腕，RGB 不翻转、不交换左右。
+每路源图为模型观测分辨率（通常 224×224），拼接输出为 448×672；不是原始
+1280×720 高清录像，也不是独立以 30 Hz 连续采集的相机录像。
+
+沿用原有启动命令，增加或修改这两个路径即可（每次 trace 目录必须全新）：
+
+```bash
+--out-dir /home/agilex/piper_deploy/runs/<本次运行>/videos \
+--trace-dir /home/agilex/piper_deploy/runs/<本次运行>/trace
+```
+
+每个 episode 独立生成 `tshape_<时间>_<唯一ID>.mp4` 和同名 `.jsonl`。
+视频播放速率跟随 `--fps`；JSONL 保存视频帧号、episode 内 step、三路源时间戳、
+主机 wall/monotonic 时间、同步误差、观测 state、提交的 action 和录像丢帧计数。
+视频帧来自动作提交成功后的 runtime 回调（dry-run 中代表提交到禁止动作发布的
+环境），不能视为硬件已执行动作；拒绝的动作及推理等待期间没有额外视频帧。
+若实际推理低于设定 FPS 或出现停顿，MP4 时长会短于真实时长，请按 JSONL
+时间戳和 trace 排查，不要据视频播放速度估算机械臂速度。
+
+编码使用后台线程和有界队列，不在动作循环等待编码；队列满时丢弃录像帧并
+记录数量。正常结束、Ctrl-C、SIGTERM、Python 异常都会收尾已排队的视频；
+SIGKILL、断电和编码/磁盘故障不保证 MP4 完整。原有其他部署入口的录像不变。
+使用 `/home/agilex/piper_deploy/04_client.sh` 时，其已有 `--out-dir` 会自动接收
+上述视频，不需要改相机/机械臂启动方式。此改动只在下一次启动客户端时加载。

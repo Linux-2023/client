@@ -516,6 +516,56 @@ def test_apply_action_enforces_configured_per_step_delta_limit() -> None:
     assert len(backend.publish_action_calls) == 1
 
 
+def test_apply_action_uses_component_limits_and_names_the_violation() -> None:
+    backend = FakeBackend()
+    limits = np.full(14, 0.05, dtype=np.float32)
+    limits[[3, 4, 5, 10, 11, 12]] = 0.10
+    names = [f"dim_{index}" for index in range(14)]
+    names[5] = "left_yaw"
+    env = Ros2DualEnvironment(
+        backend=backend,
+        dry_run=False,
+        publish_actions=True,
+        max_action_delta=0.05,
+        action_delta_limits=limits,
+        action_names=names,
+    )
+
+    env.reset()
+    env.apply_action({"actions": np.zeros(14, dtype=np.float32)})
+    allowed_orientation = np.zeros(14, dtype=np.float32)
+    allowed_orientation[5] = 0.08126
+    env.apply_action({"actions": allowed_orientation})
+
+    unsafe_position = allowed_orientation.copy()
+    unsafe_position[0] = 0.06
+    with pytest.raises(ValueError, match=r"left_yaw|dim_0") as error:
+        env.apply_action({"actions": unsafe_position})
+    assert "dim_0" in str(error.value)
+    assert len(backend.publish_action_calls) == 2
+
+
+def test_first_policy_action_is_checked_against_latest_observation_state() -> None:
+    frame = _make_frame(9.0)
+    backend = FakeBackend([frame])
+    env = Ros2DualEnvironment(
+        backend=backend,
+        dry_run=False,
+        publish_actions=True,
+        max_action_delta=0.05,
+        action_names=[f"dim_{index}" for index in range(14)],
+    )
+
+    env.reset()
+    observation = env.get_observation()
+    unsafe_first_action = np.asarray(observation["state"], dtype=np.float32).copy()
+    unsafe_first_action[2] += 0.06
+
+    with pytest.raises(ValueError, match="dim_2"):
+        env.apply_action({"actions": unsafe_first_action})
+    assert backend.publish_action_calls == []
+
+
 def test_apply_action_snapshots_float32_caller_arrays_before_publish_and_delta_check() -> None:
     backend = FakeBackend()
     env = Ros2DualEnvironment(backend=backend, dry_run=False, publish_actions=True, max_action_delta=0.4)

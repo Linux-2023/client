@@ -41,6 +41,48 @@ def test_eef_trace_records_submissions_and_episode_boundaries(tmp_path: Path) ->
     assert json.loads((tmp_path / "client_metadata.json").read_text())["args"]["use_rtc"] is True
 
 
+@pytest.mark.parametrize("mode", ["legacy", "wrapped-rpy", "so3", None])
+def test_server_metadata_roundtrips_and_flushes_before_first_episode(tmp_path: Path, mode: str | None) -> None:
+    from eef_trace_recorder import EefTraceRecorder
+
+    metadata = (
+        {
+            "rtc_orientation": {"mode": mode, "rpy_indices": [[3, 4, 5], [10, 11, 12]]},
+            "policy_config": "pi05_piper_dual_stack_cups_eef_xyz3d",
+            "checkpoint_dir": "/checkpoints/xyz3d test",
+            "existing_server_field": {"nested": [1, True, None]},
+        }
+        if mode is not None
+        else {}
+    )
+    recorder = EefTraceRecorder(tmp_path, {"args": {"use_rtc": True}}, flush_every=100)
+    initial_metadata = (tmp_path / "client_metadata.json").read_bytes()
+    try:
+        recorder.record_server_metadata(metadata)
+        records = [json.loads(line) for line in (tmp_path / "client.jsonl").read_text().splitlines()]
+        assert len(records) == 1
+        assert records[0]["event"] == "server_metadata"
+        assert records[0]["metadata"] == metadata
+        assert records[0]["schema_version"] == 1
+        assert records[0]["episode"] == -1
+        assert records[0]["step"] == 0
+        assert isinstance(records[0]["timestamp_ns"], int)
+        assert isinstance(records[0]["monotonic_ns"], int)
+        assert (tmp_path / "client_metadata.json").read_bytes() == initial_metadata
+        recorder.on_episode_start()
+        recorder.on_step({"state": np.zeros(14)}, {"actions": np.ones(14)})
+        recorder.on_episode_end()
+    finally:
+        recorder.close()
+    records = [json.loads(line) for line in (tmp_path / "client.jsonl").read_text().splitlines()]
+    assert [record["event"] for record in records] == [
+        "server_metadata", "episode_start", "action_submitted", "episode_end"
+    ]
+    assert (tmp_path / "client_metadata.json").read_bytes() == initial_metadata
+    with pytest.raises(RuntimeError, match="closed"):
+        recorder.record_server_metadata(metadata)
+
+
 @pytest.mark.parametrize("existing", ["client.jsonl", "client_metadata.json"])
 def test_eef_trace_refuses_overwrite_without_touching_existing_files(tmp_path: Path, existing: str) -> None:
     from eef_trace_recorder import EefTraceRecorder

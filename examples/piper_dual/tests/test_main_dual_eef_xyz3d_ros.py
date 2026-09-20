@@ -39,6 +39,9 @@ def test_parser_exposes_xyz3d_topics_and_safety_flags() -> None:
         "--no-dry-run",
         "--publish-actions",
         "--max-action-delta",
+        "--max-position-delta",
+        "--max-orientation-delta",
+        "--max-gripper-delta",
         "--control-stack",
     ):
         assert flag in help_text
@@ -135,6 +138,8 @@ def test_contract_summary_names_14d_xyz3d_layout_and_safety_limits() -> None:
     assert "selected_stack=official-ros" in summary
     assert "control_mode=MOVE L/P selected by PosCmd; mode_feedback is not pre-gated" in summary
     assert "effective_max_action_delta=0.05" in summary
+    assert "effective_position_delta_limit=0.05 m" in summary
+    assert "effective_orientation_delta_limit=0.05 rad" in summary
     assert "14D" in summary
     assert "left_xyzrpy" in summary
     assert "right_xyzrpy" in summary
@@ -161,6 +166,9 @@ def test_build_environment_constructs_xyz3d_backend_and_adapters(monkeypatch: py
         eef_left_action_topic="/left_cmd",
         eef_right_action_topic="/right_cmd",
         max_action_delta=20.0,
+        max_position_delta=0.05,
+        max_orientation_delta=0.10,
+        max_gripper_delta=0.02,
         ros2_config=Path(__file__).resolve().parents[1] / "ros2_piper_dual_local.yaml",
         control_stack="local-ros",
     )
@@ -177,6 +185,10 @@ def test_build_environment_constructs_xyz3d_backend_and_adapters(monkeypatch: py
     env_kwargs = captured["environment"]
     assert env_kwargs["prompt"] == "Stack the cups"
     assert env_kwargs["max_action_delta"] == pytest.approx(20.0)
+    assert env_kwargs["action_delta_limits"] == pytest.approx(
+        (0.05, 0.05, 0.05, 0.10, 0.10, 0.10, 0.02) * 2
+    )
+    assert env_kwargs["action_names"][5] == "left_yaw"
     assert env_kwargs["ros2_config"] == Path(__file__).resolve().parents[1] / "ros2_piper_dual_local.yaml"
     assert env_kwargs["control_stack"] == "local-ros"
     assert env_kwargs["observation_adapter"].__class__.__name__ == "EefXyz3dObservationAdapter"
@@ -274,7 +286,10 @@ def test_main_trace_metadata_precedes_environment_and_flushes_on_exit(
     assert result == (0 if failure is None else 130 if failure is KeyboardInterrupt else 1)
     assert observed == {"environment_closed": True, "recorder_closed": True}
     records = [json.loads(line) for line in (tmp_path / "client.jsonl").read_text().splitlines()]
-    assert [record["event"] for record in records] == ["episode_start", "action_submitted", "episode_end"]
+    assert [record["event"] for record in records] == [
+        "server_metadata", "episode_start", "action_submitted", "episode_end"
+    ]
+    assert records[0]["metadata"] == {}
     if failure is not None:
         assert records[-1]["reason"] == ("interrupted" if failure is KeyboardInterrupt else "error")
 
@@ -326,7 +341,7 @@ def test_build_runtime_records_only_after_action_submission(
             return True
 
     recorder = EefTraceRecorder(tmp_path, {}, flush_every=1)
-    monkeypatch.setitem(sys.modules, "saver", SimpleNamespace(VideoSaver=lambda path: object()))
+    monkeypatch.setitem(sys.modules, "tshape_video_saver", SimpleNamespace(TShapeVideoSaver=lambda path, fps: object()))
     environment = Environment()
     policy = SimpleNamespace(infer=lambda obs: {"actions": np.ones(14), "_chunk_trace": {"chunk_id": 9}})
     runtime = main_dual_eef_xyz3d_ros._build_runtime(
@@ -404,4 +419,130 @@ def test_main_trace_flushes_even_when_other_cleanup_raises(
     with pytest.raises(RuntimeError, match=f"{closing} close failed"):
         main_dual_eef_xyz3d_ros.main(main_dual_eef_xyz3d_ros.Args(trace_dir=tmp_path))
     records = [json.loads(line) for line in (tmp_path / "client.jsonl").read_text().splitlines()]
-    assert [record["event"] for record in records] == ["episode_start", "action_submitted", "episode_end"]
+    assert [record["event"] for record in records] == [
+        "server_metadata", "episode_start", "action_submitted", "episode_end"
+    ]
+
+
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.parametrize("mode", ["legacy", "wrapped-rpy", "so3", None])
+def test_main_records_server_provenance_once_before_episodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_async: bool, mode: str | None
+) -> None:
+    import json
+    from types import SimpleNamespace
+    import numpy as np
+    import openpi_client
+
+    trace_dir = tmp_path / "directory-label-not-authoritative"
+    metadata = (
+        {
+            "rtc_orientation": {"mode": mode},
+            "policy_config": "pi05_piper_dual_stack_cups_eef_xyz3d",
+            "checkpoint_dir": "/checkpoints/xyz3d test",
+            "existing_server_field": [1, "preserved"],
+        }
+        if mode is not None
+        else {}
+    )
+    metadata_calls = []
+    initial_metadata = []
+
+    def get_server_metadata():
+        metadata_calls.append(True)
+        return metadata
+
+    def connect(**kwargs):
+        initial_metadata.append((trace_dir / "client_metadata.json").read_bytes())
+        return SimpleNamespace(
+            infer=lambda obs: {"actions": np.ones((50, 14))},
+            reset=lambda: None,
+            get_server_metadata=get_server_metadata,
+        )
+
+    transport = SimpleNamespace(WebsocketClientPolicy=connect)
+    monkeypatch.setitem(sys.modules, "openpi_client.websocket_client_policy", transport)
+    monkeypatch.setattr(openpi_client, "websocket_client_policy", transport, raising=False)
+
+    def build_runtime(args, environment, policy, *, recorder=None):
+        assert recorder is not None
+        records = [json.loads(line) for line in (trace_dir / "client.jsonl").read_text().splitlines()]
+        assert [record["event"] for record in records] == ["server_metadata"]
+        assert records[0]["metadata"] == metadata
+        assert (trace_dir / "client_metadata.json").read_bytes() == initial_metadata[0]
+
+        def run():
+            for _ in range(2):
+                recorder.on_episode_start()
+                observation = {"state": np.zeros(14)}
+                recorder.on_step(observation, policy.infer(observation))
+                recorder.on_episode_end()
+
+        return SimpleNamespace(run=run)
+
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_environment", lambda args: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_runtime", build_runtime)
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros.signal, "signal", lambda *args: None)
+    args = main_dual_eef_xyz3d_ros.Args(trace_dir=trace_dir, use_async=use_async)
+    assert main_dual_eef_xyz3d_ros.main(args) == 0
+    assert len(metadata_calls) == 1
+    records = [json.loads(line) for line in (trace_dir / "client.jsonl").read_text().splitlines()]
+    assert [record["event"] for record in records] == ["server_metadata"] + [
+        "episode_start", "action_submitted", "episode_end"
+    ] * 2
+    assert records[0]["metadata"] == metadata
+    assert (trace_dir / "client_metadata.json").read_bytes() == initial_metadata[0]
+
+
+def test_main_without_trace_never_reads_server_metadata_or_constructs_recorder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+    import eef_trace_recorder
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("tracing is disabled")
+
+    ran = []
+    policy = SimpleNamespace(get_server_metadata=unexpected)
+    monkeypatch.setattr(eef_trace_recorder, "EefTraceRecorder", unexpected)
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_environment", lambda args: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_policy", lambda args: policy)
+    monkeypatch.setattr(
+        main_dual_eef_xyz3d_ros,
+        "_build_runtime",
+        lambda args, environment, policy: SimpleNamespace(run=lambda: ran.append(True)),
+    )
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros.signal, "signal", lambda *args: None)
+    assert main_dual_eef_xyz3d_ros.main(main_dual_eef_xyz3d_ros.Args(out_dir=tmp_path)) == 0
+    assert ran == [True]
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, KeyboardInterrupt])
+def test_main_preserves_server_metadata_when_runtime_construction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    metadata = {"rtc_orientation": {"mode": "so3"}, "checkpoint_dir": "/checkpoints/xyz3d"}
+    closed = []
+
+    def build_runtime(args, environment, policy, *, recorder=None):
+        raise failure("runtime construction stopped")
+
+    monkeypatch.setattr(
+        main_dual_eef_xyz3d_ros, "_build_environment", lambda args: SimpleNamespace(close=lambda: closed.append(True))
+    )
+    monkeypatch.setattr(
+        main_dual_eef_xyz3d_ros, "_build_policy", lambda args: SimpleNamespace(get_server_metadata=lambda: metadata)
+    )
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros, "_build_runtime", build_runtime)
+    monkeypatch.setattr(main_dual_eef_xyz3d_ros.signal, "signal", lambda *args: None)
+    result = main_dual_eef_xyz3d_ros.main(main_dual_eef_xyz3d_ros.Args(trace_dir=tmp_path))
+    assert result == (130 if failure is KeyboardInterrupt else 1)
+    assert closed == [True]
+    records = [json.loads(line) for line in (tmp_path / "client.jsonl").read_text().splitlines()]
+    assert [record["event"] for record in records] == ["server_metadata"]
+    assert records[0]["metadata"] == metadata

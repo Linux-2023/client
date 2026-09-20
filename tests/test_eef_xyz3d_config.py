@@ -136,6 +136,29 @@ def test_fold_towel_small_subsets_preserve_fold50_contract(episode_count):
     )
 
 
+@pytest.mark.parametrize("episode_count", [50, 20, 10])
+def test_stack_cups_subsets_preserve_training_contract(episode_count):
+    import dataclasses
+
+    previous = config.get_config("pi05_piper_dual_stack_cups_eef_xyz3d_100")
+    subset = config.get_config(f"pi05_piper_dual_stack_cups_eef_xyz3d_{episode_count}")
+    assert subset.num_train_steps == 30_000
+    assert subset.data.base_config.episodes == tuple(range(episode_count))
+    assert dataclasses.replace(
+        subset, name=previous.name, data=previous.data,
+        num_train_steps=previous.num_train_steps,
+    ) == previous
+    assert dataclasses.replace(subset.data, base_config=previous.data.base_config) == previous.data
+    assert dataclasses.replace(subset.data.base_config, episodes=None) == previous.data.base_config
+    data = subset.data.create(subset.assets_dirs, subset.model)
+    assert data.episodes == tuple(range(episode_count))
+    assert data.action_sequence_keys == ("action",)
+    assert subset.assets_dirs != previous.assets_dirs
+    assert dataclasses.replace(subset, exp_name="subset").checkpoint_dir != (
+        dataclasses.replace(previous, exp_name="subset").checkpoint_dir
+    )
+
+
 def test_eef_xyz3d_transforms_preserve_14d_contract():
     cfg = config.get_config("pi05_piper_dual_stack_cups_eef_xyz3d")
     data = cfg.data.create(cfg.assets_dirs, cfg.model)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from openpi_client.runtime import environment as _environment
@@ -39,6 +39,8 @@ class Ros2DualEnvironment(_environment.Environment):
         frame_timeout: float = DEFAULT_FRAME_TIMEOUT,
         max_episode_steps: int = 500,
         max_action_delta: float | None = None,
+        action_delta_limits: Sequence[float] | None = None,
+        action_names: Sequence[str] | None = None,
         control_stack: str = "official-ros",
         **_: Any,
     ) -> None:
@@ -75,10 +77,28 @@ class Ros2DualEnvironment(_environment.Environment):
         self._publish_actions_locked = False
         self._publish_actions = self._publish_actions_requested
         self._max_action_delta = max_action_delta_value
+        if action_delta_limits is None:
+            self._action_delta_limits = (
+                None
+                if max_action_delta_value is None
+                else np.full(14, max_action_delta_value, dtype=np.float32)
+            )
+        else:
+            limits = np.asarray(action_delta_limits, dtype=np.float32)
+            if limits.shape != (14,) or not np.isfinite(limits).all() or np.any(limits < 0):
+                raise ValueError("action_delta_limits must contain exactly 14 finite non-negative values")
+            self._action_delta_limits = limits.copy()
+        if action_names is None:
+            self._action_names = tuple(f"action[{index}]" for index in range(14))
+        else:
+            if len(action_names) != 14 or not all(isinstance(name, str) and name for name in action_names):
+                raise ValueError("action_names must contain exactly 14 non-empty strings")
+            self._action_names = tuple(action_names)
         self._done = True
         self._closed = False
         self._step_count = 0
         self._last_observation_timestamp: float | None = None
+        self._last_observation_state: np.ndarray | None = None
         self._previous_action: np.ndarray | None = None
 
     @staticmethod
@@ -104,6 +124,7 @@ class Ros2DualEnvironment(_environment.Environment):
         self._done = False
         self._step_count = 0
         self._last_observation_timestamp = None
+        self._last_observation_state = None
         self._previous_action = None
         self._publish_actions = self._publish_actions_requested and not self._publish_actions_locked
 
@@ -155,6 +176,7 @@ class Ros2DualEnvironment(_environment.Environment):
                 raise
 
             self._last_observation_timestamp = timestamp
+            self._last_observation_state = np.asarray(observation["state"], dtype=np.float32).copy()
             return observation
 
     @override
@@ -181,12 +203,29 @@ class Ros2DualEnvironment(_environment.Environment):
             self._fail_episode()
             raise
         validated = np.array(validated, dtype=np.float32, copy=True)
-        if self._max_action_delta is not None and self._previous_action is not None:
-            delta = float(np.max(np.abs(validated - self._previous_action)))
-            if delta > self._max_action_delta:
+        baseline = self._previous_action
+        # In a live episode the first target must also be close to the measured
+        # EEF pose.  A dry-run never publishes that target, so it remains useful
+        # for inspecting policies whose recorded initial scene is not aligned.
+        if baseline is None and self._publish_actions:
+            baseline = self._last_observation_state
+        if self._action_delta_limits is not None and baseline is not None:
+            deltas = np.abs(validated - baseline)
+            exceeded = deltas > self._action_delta_limits
+            if np.any(exceeded):
+                # Report the largest normalized violation so mixed-unit EEF
+                # limits still identify the component that actually failed.
+                ratios = np.divide(
+                    deltas,
+                    self._action_delta_limits,
+                    out=np.full_like(deltas, np.inf),
+                    where=self._action_delta_limits > 0,
+                )
+                index = int(np.argmax(np.where(exceeded, ratios, -np.inf)))
                 self._fail_episode()
                 raise ValueError(
-                    f"Action delta {delta:.6f} exceeds max_action_delta {self._max_action_delta:.6f}"
+                    f"Action delta {float(deltas[index]):.6f} at {self._action_names[index]} "
+                    f"exceeds max_action_delta limit {float(self._action_delta_limits[index]):.6f}"
                 )
 
         if self._publish_actions:

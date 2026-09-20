@@ -89,15 +89,19 @@ class Runtime:
         for subscriber in self._subscribers:
             subscriber.on_episode_end()
         
-        # custom function
-        try:
-            self._environment._save_episode_to_hdf5()
-        except Exception as exc:
-            logging.exception("Failed to save episode: %s", exc)
-        try:
-            self._agent._policy._plot_error_history()
-        except Exception as exc:
-            logging.exception("Failed to plot error history: %s", exc)
+        # Optional hooks are implemented only by some environments/policies.
+        save_episode = getattr(self._environment, "_save_episode_to_hdf5", None)
+        if callable(save_episode):
+            try:
+                save_episode()
+            except Exception as exc:
+                logging.exception("Failed to save episode: %s", exc)
+        plot_error_history = getattr(getattr(self._agent, "_policy", None), "_plot_error_history", None)
+        if callable(plot_error_history):
+            try:
+                plot_error_history()
+            except Exception as exc:
+                logging.exception("Failed to plot error history: %s", exc)
         
 
     def _step(self) -> None:
@@ -149,5 +153,3 @@ class Runtime:
         print("Reset complete")
         self._environment.reset()
         self._agent.reset()
-
-        

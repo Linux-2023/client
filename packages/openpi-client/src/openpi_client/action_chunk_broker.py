@@ -76,6 +76,11 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         self._last_results: Dict[str, np.ndarray] | None = None
         self._prev_full_actions: np.ndarray | None = None  # Previous action chunk for GPR
 
+    def get_server_metadata(self) -> Dict:
+        """Expose server provenance when the wrapped policy provides it."""
+        get_metadata = getattr(self._policy, "get_server_metadata", None)
+        return get_metadata() if callable(get_metadata) else {}
+
     @override
     def infer(self, obs: Dict) -> Dict:  # noqa: UP006
         if self._last_results is None:
@@ -133,7 +138,7 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
     _instances = []  # Class-level list to track all instances
     _atexit_registered = False  # Flag to ensure atexit is only registered once
 
-    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int, fps: int = 30, actions_during_latency: int = 1, use_rtc: bool = True, *, trace_enabled: bool = False):
+    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int, fps: int = 30, actions_during_latency: int = 1, use_rtc: bool = True, *, trace_enabled: bool = False, handoff_blend_steps: int = 0):
         self._policy = policy
         self._max_horizon = 50
         self._action_dim = 14
@@ -142,6 +147,7 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
         self._infer_latency = deque(maxlen=10)  # Buffer for last 10 inference latencies
         self._avg_latency_ms: float = 0.0  # Average latency in milliseconds
         self._actions_during_latency = actions_during_latency  # Number of actions executed during avg latency
+        self._handoff_blend_steps = max(0, int(handoff_blend_steps))
         self._actions_during_latency_realtime: int = 0  # Number of actions executed during avg latency
         self._cur_step: int = 0
 
@@ -171,6 +177,11 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
         self._chunk_action_records: List[Dict[str, np.ndarray | int]] = []  # Keep full chunk outputs and overlaps
 
     
+    def get_server_metadata(self) -> Dict:
+        """Expose server provenance when the wrapped policy provides it."""
+        get_metadata = getattr(self._policy, "get_server_metadata", None)
+        return get_metadata() if callable(get_metadata) else {}
+
     def _record_chunk_actions(self, results: Dict, overlap_steps: int) -> None:
         """Persist raw chunk actions along with overlap metadata."""
         if 'actions' not in results:
@@ -187,6 +198,39 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
             'overlap': max(0, min(int(overlap_steps), actions.shape[0] if actions.ndim > 0 else 0)),
         }
         self._chunk_action_records.append(record)
+
+    def _blend_handoff(self, results: Dict, start_step: int) -> Dict:
+        """Blend the adopted prefix from the last command to the new chunk.
+
+        EEF roll/pitch/yaw use the shortest wrapped angular displacement. The
+        server result is copied so tracing and GPR inputs cannot be mutated.
+        """
+        blended = dict(results)
+        actions = results.get('actions')
+        previous = None if self._prev_returned_action is None else self._prev_returned_action.get('actions')
+        if (
+            self._handoff_blend_steps < 1
+            or not isinstance(actions, np.ndarray)
+            or actions.ndim != 2
+            or actions.shape[1] != self._action_dim
+            or previous is None
+        ):
+            return blended
+        actions = actions.copy()
+        previous = np.asarray(previous, dtype=actions.dtype).reshape(-1)
+        if previous.shape != (self._action_dim,):
+            return blended
+        count = min(self._handoff_blend_steps, max(0, actions.shape[0] - start_step))
+        angle_indices = np.array([3, 4, 5, 10, 11, 12])
+        for offset in range(count):
+            index = start_step + offset
+            alpha = (offset + 1) / count
+            target = actions[index].copy()
+            delta = target - previous
+            delta[angle_indices] = (delta[angle_indices] + np.pi) % (2 * np.pi) - np.pi
+            actions[index] = previous + alpha * delta
+        blended['actions'] = actions
+        return blended
 
     def _build_chunk_action_series(self) -> Tuple[np.ndarray, List[Tuple[int, np.ndarray]], List[Tuple[int, np.ndarray]]]:
         """Return stitched chunk series plus overlap segments for plotting."""
@@ -609,7 +653,7 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
                 # self._prev_results = tree.map_structure(slicer_prev, new_results)
                 # smooth the last results
                 # smooth_results = tree.map_structure(slicer_excute, new_results)
-                self._last_results = new_results #smooth_results #tree.map_structure(slicer_excute, new_results)
+                self._last_results = self._blend_handoff(new_results, self._actions_during_latency_realtime)
                 self._prev_obs = obs.copy() # for delta action culation
                 self._cur_step = self._actions_during_latency_realtime
                 if self._trace is not None:
@@ -677,14 +721,24 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
                 if not self._chunk_boundaries:
                     self._chunk_boundaries.append(0)
 
+            actions = self._last_results.get('actions')
+            if not isinstance(actions, np.ndarray) or actions.ndim < 1 or actions.shape[0] < 1:
+                raise ValueError("Async policy result must contain a non-empty actions array")
+            # A slow policy call can outlive the 50-step chunk.  Keep returning
+            # its final absolute target until the replacement arrives instead
+            # of indexing past the array or inventing another target.
+            selected_step = min(self._cur_step, actions.shape[0] - 1)
+
             def slicer(x):
                 if isinstance(x, np.ndarray):
-                    return x[self._cur_step, ...]
+                    if x.ndim < 1 or x.shape[0] < 1:
+                        return x
+                    return x[min(selected_step, x.shape[0] - 1), ...]
                 else:
                     return x
             results = tree.map_structure(slicer, self._last_results)
             if self._trace is not None:
-                results["_chunk_trace"] = self._trace.select(self._cur_step)
+                results["_chunk_trace"] = self._trace.select(selected_step)
             
             # Calculate action variation for logging (position change only)
             if self._prev_returned_action is not None:

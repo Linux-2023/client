@@ -18,6 +18,7 @@ import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
+import openpi.policies.dobot_right_policy as dobot_right_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.piper_policy as piper_policy
@@ -101,6 +102,8 @@ class DataConfig:
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # Path to the data filter file for DROID dataset
     filter_dict_path: str | None = None
+    # Optional embedded-image selection before decoding. None keeps all images.
+    image_keys: Sequence[str] | None = None
 
 
 class GroupFactory(Protocol):
@@ -287,6 +290,32 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             action_sequence_keys=self.action_sequence_keys,
         )
     
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotDobotRightDataConfig(DataConfigFactory):
+    """Dobot digital-scale data: right joints/gripper only, top and right wrist."""
+
+    default_prompt: str = "Pick up the mango, weigh it on the scale, then place it into the container."
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if model_config.model_type != ModelType.PI05:
+            raise ValueError("Dobot right-arm configuration requires pi05")
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=_transforms.Group(inputs=[dobot_right_policy.DobotRightRepack()]),
+            data_transforms=_transforms.Group(
+                inputs=[dobot_right_policy.DobotRightInputs()],
+                outputs=[dobot_right_policy.DobotRightOutputs()],
+            ),
+            model_transforms=ModelTransformFactory(
+                default_prompt=self.default_prompt
+            )(model_config),
+            action_sequence_keys=("action",),
+            image_keys=("observation.images.top", "observation.images.right_wrist"),
+            prompt_from_task=True,
+        )
+
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotFlexivDataConfig(DataConfigFactory):
@@ -820,6 +849,30 @@ _CONFIGS = [
         policy_metadata={"reset_pose": [0, 0, 0, 0, 0, 0]},
     ),
     TrainConfig(
+        name="pi05_dobot_yx_button_right",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=50),
+        data=LeRobotDobotRightDataConfig(repo_id="wwccww/yx_button_lerobot_video", default_prompt="yx button"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=30_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="pi05_dobot_yx_digital_scale_right",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=32, action_horizon=50),
+        data=LeRobotDobotRightDataConfig(repo_id="wwccww/yx_digital_scale"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=30_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
         name="pi05_piper_dual_stack_cups",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=50, discrete_state_input=False),
         data=LeRobotPiperDataConfig(
@@ -908,6 +961,29 @@ _CONFIGS = [
         fsdp_devices=4,
     ),
     TrainConfig(
+        name="pi05_piper_dual_clean_table_eef_xyz3d_50",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_clean_table_eef_xyz3d",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Clean the table.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/pfs/pfs-7jnepv/lgd/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=30_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=8,
+    ),
+    TrainConfig(
         name="pi05_piper_dual_stack_cups_eef_xyz3d_100",
         model=pi0_config.Pi0Config(
             pi05=True,
@@ -926,6 +1002,75 @@ _CONFIGS = [
         batch_size=128,
         num_workers=0,
         num_train_steps=50_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_stack_cups_eef_xyz3d_50",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_stack_cups_eef_xyz3d_100",
+            base_config=DataConfig(prompt_from_task=True, episodes=tuple(range(50))),
+            default_prompt="Stack the paper cups together.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/pfs/pfs-7jnepv/lgd/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=30_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_stack_cups_eef_xyz3d_20",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_stack_cups_eef_xyz3d_100",
+            base_config=DataConfig(prompt_from_task=True, episodes=tuple(range(20))),
+            default_prompt="Stack the paper cups together.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/pfs/pfs-7jnepv/lgd/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=30_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_stack_cups_eef_xyz3d_10",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_stack_cups_eef_xyz3d_100",
+            base_config=DataConfig(prompt_from_task=True, episodes=tuple(range(10))),
+            default_prompt="Stack the paper cups together.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/pfs/pfs-7jnepv/lgd/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=30_000,
         save_interval=10_000,
         keep_period=10_000,
         fsdp_devices=4,

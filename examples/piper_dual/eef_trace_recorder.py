@@ -60,6 +60,12 @@ class EefTraceRecorder(_subscriber.Subscriber):
                 self._stream = None
             raise
 
+    def record_server_metadata(self, metadata: dict[str, Any]) -> None:
+        """Persist connection provenance before an episode can start or fail."""
+        self._record("server_metadata", metadata=metadata)
+        self._stream.flush()
+        self._pending = 0
+
     @override
     def on_episode_start(self) -> None:
         self._ensure_open()
