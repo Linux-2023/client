@@ -16,6 +16,7 @@ from streaming_hdf5 import StreamingEpisodeWriter
 from streaming_hdf5 import validate_episode
 from test_streaming_hdf5 import CAMERAS
 from test_streaming_hdf5 import SENSORS
+from test_streaming_hdf5 import eef_frame
 from test_streaming_hdf5 import frame
 
 
@@ -23,6 +24,17 @@ def write_valid_episode(path: Path, count: int = 2) -> Path:
     writer = StreamingEpisodeWriter.open(path, metadata={"purpose": "schema-test"}, jpeg_quality=75, flush_every=1)
     for index in range(count):
         writer.append(frame(index))
+    return writer.finalize()
+
+
+def write_valid_eef_episode(path: Path, count: int = 2) -> Path:
+    metadata = {
+        "purpose": "schema-test",
+        "eef": {"enabled": True, "master": {"source": "fk_from_master_joints", "inputs": ["/action"]}},
+    }
+    writer = StreamingEpisodeWriter.open(path, metadata=metadata, jpeg_quality=75, flush_every=1, include_eef=True)
+    for index in range(count):
+        writer.append(eef_frame(index))
     return writer.finalize()
 
 
@@ -84,6 +96,36 @@ def test_validate_episode_reports_missing_mismatched_bad_jpeg_and_nonmonotonic_t
     assert any("sync_error/master_left" in error and "length" in error for error in report["errors"])
 
 
+def test_validate_episode_requires_declared_master_eef_datasets(tmp_path: Path):
+    final_path = write_valid_eef_episode(tmp_path / "eef-source.hdf5", count=2)
+
+    assert validate_episode(final_path)["errors"] == []
+
+    corrupt_path = tmp_path / "eef-missing-master.hdf5"
+    final_path.replace(corrupt_path)
+    with h5py.File(corrupt_path, "a") as episode:
+        del episode["/observations/eef/master_right"]
+
+    report = validate_episode(corrupt_path)
+
+    assert any("observations/eef/master_right" in error for error in report["errors"])
+
+
+def test_validate_episode_accepts_legacy_puppet_only_eef_layout(tmp_path: Path):
+    final_path = write_valid_eef_episode(tmp_path / "eef-source.hdf5", count=2)
+
+    legacy_path = tmp_path / "legacy-eef.hdf5"
+    final_path.replace(legacy_path)
+    with h5py.File(legacy_path, "a") as episode:
+        metadata = json.loads(episode.attrs["metadata_json"])
+        del metadata["eef"]["master"]
+        episode.attrs["metadata_json"] = json.dumps(metadata)
+        del episode["/observations/eef/master_left"]
+        del episode["/observations/eef/master_right"]
+
+    assert validate_episode(legacy_path)["errors"] == []
+
+
 def test_finalize_leaves_partial_when_validation_fails_and_does_not_replace_existing_final(tmp_path: Path):
     final_path = write_valid_episode(tmp_path / "published.hdf5", count=1)
     with h5py.File(final_path, "r") as episode:
@@ -96,7 +138,7 @@ def test_finalize_leaves_partial_when_validation_fails_and_does_not_replace_exis
 
     partial_path = final_path.with_suffix(".hdf5.partial")
     with h5py.File(partial_path, "r+") as episode:
-        episode["/observations/images/cam_left_wrist"][0] = np.frombuffer(b"bad jpeg bytes", dtype=np.uint8)
+        episode["/observations/sync_error/master_left"].resize((0,))
         episode.flush()
 
     try:

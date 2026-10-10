@@ -66,6 +66,8 @@ def eef_frame(index: int) -> SynchronizedFrame:
         eef={
             "puppet_left": np.arange(6, dtype=np.float32) + index,
             "puppet_right": np.arange(6, dtype=np.float32) + 10 + index,
+            "master_left": np.arange(6, dtype=np.float32) + 20 + index,
+            "master_right": np.arange(6, dtype=np.float32) + 30 + index,
         },
     )
 
@@ -77,6 +79,43 @@ def open_writer(path: Path, *, metadata: dict | None = None, flush_every: int = 
         jpeg_quality=82,
         flush_every=flush_every,
     )
+
+
+def test_finalize_gate_covers_structure_without_decoding_images(tmp_path: Path):
+    """Per-episode finalize stays cheap: structure is enforced, JPEG decoding is deferred."""
+    final_path = tmp_path / "structural.hdf5"
+    writer = StreamingEpisodeWriter.open(final_path, metadata={"purpose": "finalize-gate"}, flush_every=1)
+    item = frame(0)
+    writer.append(
+        SynchronizedFrame(
+            timestamp=item.timestamp,
+            images={**item.images, "cam_high": b"not a jpeg"},
+            state=item.state,
+            action=item.action,
+            sensor_timestamps=item.sensor_timestamps,
+            sync_error=item.sync_error,
+        )
+    )
+    writer.finalize()
+
+    assert validate_episode(final_path)["errors"] != []
+    assert validate_episode(final_path, decode_images=False)["errors"] == []
+
+    structural_path = tmp_path / "structural-failure.hdf5"
+    failing = StreamingEpisodeWriter.open(structural_path, metadata={"purpose": "finalize-gate"}, flush_every=1)
+    failing.append(frame(0))
+    failing.flush()
+    partial_path = structural_path.with_suffix(".hdf5.partial")
+    with h5py.File(partial_path, "r+") as episode:
+        episode["/observations/sensor_timestamps/cam_high"].resize((0,))
+        episode.flush()
+
+    with pytest.raises(ValueError, match="validation failed"):
+        failing.finalize()
+
+    assert not structural_path.exists()
+    assert partial_path.exists()
+    failing.abort()
 
 
 def test_finalize_rejects_zero_frame_episode_and_leaves_diagnostic_partial(tmp_path: Path):
@@ -229,7 +268,11 @@ def test_eef_writer_round_trips_frame_aligned_pose_and_timing_datasets(tmp_path:
     final_path = tmp_path / "eef.hdf5"
     metadata = {
         "collector": "collect_data_eef_ros2.py",
-        "eef": {"enabled": True, "order": ["x", "y", "z", "roll", "pitch", "yaw"]},
+        "eef": {
+            "enabled": True,
+            "order": ["x", "y", "z", "roll", "pitch", "yaw"],
+            "master": {"source": "fk_from_master_joints", "inputs": ["/action"]},
+        },
     }
     writer = StreamingEpisodeWriter.open(final_path, metadata=metadata, include_eef=True)
     expected = eef_frame(0)
@@ -238,11 +281,12 @@ def test_eef_writer_round_trips_frame_aligned_pose_and_timing_datasets(tmp_path:
     writer.finalize()
 
     with h5py.File(final_path, "r") as episode:
-        np.testing.assert_array_equal(episode["/observations/eef/puppet_left"][0], expected.eef["puppet_left"])
-        np.testing.assert_array_equal(episode["/observations/eef/puppet_right"][0], expected.eef["puppet_right"])
-        assert episode["/observations/eef/puppet_left"].shape == (1, 6)
-        assert episode["/observations/eef/puppet_left"].maxshape == (None, 6)
-        assert episode["/observations/eef/puppet_left"].dtype == np.dtype("float32")
+        for arm in ("puppet_left", "puppet_right", "master_left", "master_right"):
+            dataset = episode[f"/observations/eef/{arm}"]
+            np.testing.assert_array_equal(dataset[0], expected.eef[arm])
+            assert dataset.shape == (1, 6)
+            assert dataset.maxshape == (None, 6)
+            assert dataset.dtype == np.dtype("float32")
         assert episode["/observations/sensor_timestamps/eef_puppet_left"].shape == (1,)
         assert episode["/observations/sync_error/eef_puppet_right"].shape == (1,)
     assert validate_episode(final_path)["errors"] == []
@@ -262,15 +306,31 @@ def test_ordinary_writer_does_not_create_eef_group(tmp_path: Path):
     ("eef", "match"),
     [
         (None, "EEF"),
-        ({"puppet_left": np.zeros(6, dtype=np.float32)}, "exactly"),
-        ({"puppet_left": np.zeros(5), "puppet_right": np.zeros(6)}, "six"),
-        ({"puppet_left": np.zeros(6), "puppet_right": np.array([0, 0, 0, 0, 0, np.nan])}, "finite"),
+        ({"master_left": np.zeros(6, dtype=np.float32), "master_right": np.zeros(6, dtype=np.float32)}, "exactly"),
+        (
+            {
+                "puppet_left": np.zeros(6, dtype=np.float32),
+                "puppet_right": np.zeros(6, dtype=np.float32),
+                "master_left": np.zeros(5, dtype=np.float32),
+                "master_right": np.zeros(6, dtype=np.float32),
+            },
+            "six",
+        ),
+        (
+            {
+                "puppet_left": np.zeros(6, dtype=np.float32),
+                "puppet_right": np.zeros(6, dtype=np.float32),
+                "master_left": np.zeros(6, dtype=np.float32),
+                "master_right": np.array([0, 0, 0, 0, 0, np.nan]),
+            },
+            "finite",
+        ),
     ],
 )
 def test_eef_writer_rejects_missing_malformed_or_non_finite_pose(eef, match, tmp_path: Path):
     writer = StreamingEpisodeWriter.open(
         tmp_path / "bad-eef.hdf5",
-        metadata={"eef": {"enabled": True}},
+        metadata={"eef": {"enabled": True, "master": {"source": "fk_from_master_joints"}}},
         include_eef=True,
     )
     malformed = eef_frame(0)
@@ -294,5 +354,14 @@ def test_eef_writer_requires_matching_metadata_marker(tmp_path: Path):
         StreamingEpisodeWriter.open(
             tmp_path / "unmarked.hdf5",
             metadata={"collector": "collect_data_eef_ros2.py"},
+            include_eef=True,
+        )
+
+
+def test_eef_writer_requires_declared_master_eef_source(tmp_path: Path):
+    with pytest.raises(ValueError, match="eef.master.source"):
+        StreamingEpisodeWriter.open(
+            tmp_path / "undeclared-master.hdf5",
+            metadata={"collector": "collect_data_eef_ros2.py", "eef": {"enabled": True}},
             include_eef=True,
         )

@@ -11,12 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import frame_synchronizer as frame_synchronizer_module
 from frame_synchronizer import FrameSynchronizer
+from master_eef import MasterEefKinematics
 
 
 IMAGE_SENSORS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 JOINT_SENSORS = ("puppet_left", "puppet_right", "master_left", "master_right")
 ALL_SENSORS = IMAGE_SENSORS + JOINT_SENSORS
 EEF_SENSOR_NAMES = ("eef_puppet_left", "eef_puppet_right")
+EEF_ARM_NAMES = ("puppet_left", "puppet_right", "master_left", "master_right")
 ALL_SENSORS_WITH_EEF = ALL_SENSORS + EEF_SENSOR_NAMES
 
 
@@ -239,6 +241,7 @@ def test_unknown_sensors_and_invalid_timestamps_or_values_are_rejected(sensor, t
 
 def test_default_mode_preserves_required_sensors_and_rejects_eef_streams():
     assert frame_synchronizer_module.EEF_SENSORS == EEF_SENSOR_NAMES
+    assert frame_synchronizer_module.EEF_ARMS == EEF_ARM_NAMES
     assert frame_synchronizer_module.EEF_DIMENSION == 6
 
     sync = FrameSynchronizer(max_error=0.03)
@@ -279,6 +282,11 @@ def test_eef_mode_aligns_pose_streams_and_emits_synchronized_metadata():
     assert frame.eef["puppet_right"].shape == (6,)
     assert np.isfinite(frame.eef["puppet_left"]).all()
     assert np.isfinite(frame.eef["puppet_right"]).all()
+    # Master poses are derived from the same frame's master joint rows, not from a topic.
+    kinematics = MasterEefKinematics()
+    np.testing.assert_array_equal(frame.eef["master_left"], kinematics.eef(joint_values(20)))
+    np.testing.assert_array_equal(frame.eef["master_right"], kinematics.eef(joint_values(30)))
+    assert set(frame.eef) == set(frame_synchronizer_module.EEF_ARMS)
     assert frame.sensor_timestamps["eef_puppet_left"] == pytest.approx(10.012)
     assert frame.sensor_timestamps["eef_puppet_right"] == pytest.approx(9.985)
     assert frame.sync_error["eef_puppet_left"] == pytest.approx(0.012)

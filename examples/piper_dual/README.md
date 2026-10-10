@@ -111,19 +111,21 @@ python examples/piper_dual/collect_data_ros2.py \
 - `--render-after-save`: 每次按 `s` finalize 后在 HDF5 旁边导出 `.preview.mp4` 三相机预览视频。
 
 窗口会预览 `cam_high`、`cam_left_wrist`、`cam_right_wrist` 三路相机并显示状态与 prompt。按键说明：
-- `s`: 在 PREVIEW 开始录制；在 RECORDING 时按 `s` 或 `e` 都会结束当前 episode、finalize/validate HDF5，可选渲染，然后回到 PREVIEW；如果当前 episode 为空或 HDF5 验证失败，采集器会显示失败原因、删除未发布的 `.hdf5.partial`，并回到 PREVIEW，不会关闭 ROS 2 backend。
+- `s`: 在 PREVIEW 开始录制；在 RECORDING 时按 `s` 或 `e` 都会结束当前 episode、finalize 并做结构校验，可选渲染，然后回到 PREVIEW；如果当前 episode 为空或结构校验失败，采集器会显示失败原因、删除未发布的 `.hdf5.partial`，并回到 PREVIEW，不会关闭 ROS 2 backend。
 - `e`: 在 PREVIEW 下无操作；仅在 RECORDING 时作为 `s` 的别名完成 finalize。
 - `q`: 退出；如果有未 finalize 的 partial 文件会 abort，不会发布最终 HDF5。
 
 
+**单集 finalize 只做结构校验**：检查 dataset 是否齐全、形状/dtype/可扩展性、数值有限性、时间戳单调性，**不逐帧解码 JPEG**。1818 帧的一集里，全量校验（含逐帧解码）耗时 **25.7 s**，结构校验只需 **0.58 s**（解码占 97.7%），因此采集循环不再为每条数据付这个代价。需要完整校验时显式调用 `streaming_hdf5.validate_episode(path)`（离线工具、转换脚本 `--deep-validate`、`render_dataset.py` 走的都是全量路径）；代价是「图像字节不可解码」这类问题不会再在 finalize 当场拦下，而是留到离线校验/渲染时暴露。
+
 每个 finalize 后的 HDF5 都是自包含文件，包含三路 JPEG 图像、14 维 state/action、时间戳、同步误差和采集 metadata，可独立复制和验证。它们的根属性固定包含 `schema_version`、`frame_count`、`jpeg_quality`、`metadata_json`、`camera_mapping_json`、`units_json`、`image_preprocessing_json` 和 `timing_counters_json`；结构检测不依赖文件名。
 
-#### 4. ROS 2 EEF 数据收集（关节角度 + puppet 末端位姿）
+#### 4. ROS 2 EEF 数据收集（主臂 + 从臂关节角度与末端位姿）
 
-EEF 采集器在现有关节 state/action 基础上，额外同步并保存左右 puppet 臂的 `geometry_msgs/msg/PoseStamped` 末端位姿。Piper ROS 节点默认话题为 `/puppet/end_pose_left` 和 `/puppet/end_pose_right`；默认位置单位为米，姿态转换为弧度制 `[x, y, z, roll, pitch, yaw]`。
+EEF 采集器在现有关节 state/action 基础上，额外同步并保存左右 puppet 臂的 `geometry_msgs/msg/PoseStamped` 末端位姿，并按同一帧的主臂关节向量推导左右主臂末端位姿。Piper ROS 节点默认话题为 `/puppet/end_pose_left` 和 `/puppet/end_pose_right`；默认位置单位为米，姿态转换为弧度制 `[x, y, z, roll, pitch, yaw]`。
 
 ```bash
-cd /home/agilex/client/.worktrees/piper-dual-ros2-migration
+cd /home/agilex/client
 source /opt/ros/humble/setup.bash
 source /home/agilex/piper_ros/install/setup.bash
 source .venv/bin/activate
@@ -131,22 +133,29 @@ source .venv/bin/activate
 python examples/piper_dual/collect_data_eef_ros2.py \
   --output-dir /home/agilex/piper_dual_dataset/fold_towel_eef \
   --prompt "Fold the towel" \
-  --config examples/piper_dual/ros2_piper_dual.yaml \
+  --config examples/piper_dual/ros2_piper_dual_local.yaml \
+  --control-stack local-ros \
   --bridge-python /usr/bin/python3 \
   --max-sync-error-ms 30 \
   --dry-run
 ```
 
-可通过 `--eef-left-topic` 和 `--eef-right-topic` 覆盖 EEF 话题。三路相机、四路关节流和两路 EEF 必须共同满足 `--max-sync-error-ms`，否则该参考帧不会写入；不会填充 NaN 或另写独立 EEF 时间序列。
+可通过 `--eef-left-topic` 和 `--eef-right-topic` 覆盖 EEF 话题。三路相机、四路关节流和两路 puppet EEF 必须共同满足 `--max-sync-error-ms`，否则该参考帧不会写入；不会填充 NaN 或另写独立 EEF 时间序列。
 
-EEF episode 仍保持 `/observations/state` 和 `/action` 的 14 维关节格式，并额外包含：
+EEF episode 仍保持 `/observations/state` 和 `/action` 的 14 维关节格式（state = 从臂关节，action = 主臂关节），并额外包含：
 
 ```text
-/observations/eef/puppet_left     (N, 6) float32  [x,y,z,roll,pitch,yaw]
-/observations/eef/puppet_right    (N, 6) float32  [x,y,z,roll,pitch,yaw]
+/observations/eef/puppet_left     (N, 6) float32  [x,y,z,roll,pitch,yaw]  ← /puppet/end_pose_left 话题
+/observations/eef/puppet_right    (N, 6) float32  [x,y,z,roll,pitch,yaw]  ← /puppet/end_pose_right 话题
+/observations/eef/master_left     (N, 6) float32  [x,y,z,roll,pitch,yaw]  ← FK(同一帧 /action 左臂 7 维)
+/observations/eef/master_right    (N, 6) float32  [x,y,z,roll,pitch,yaw]  ← FK(同一帧 /action 右臂 7 维)
 ```
 
-`metadata_json.eef.enabled` 标记 EEF 文件；对应 EEF 传感器的时间戳和同步误差位于 `/observations/sensor_timestamps`、`/observations/sync_error`。当前 `convert_ros2_piper_data_to_lerobot.py` 保持原行为，不会把这些原始 EEF 数据加入 LeRobot state。
+**主臂 EEF 的来源**：piper 驱动只反馈被测（从臂）末端位姿，总线与 firmware 都不提供主臂末端位姿话题，因此 `/observations/eef/master_*` 由同一帧 `action` 的主臂关节向量经 vendored Piper 正运动学（`third_party/piper_sdk/piper_sdk/kinematics/piper_fk.py`，`dh_is_offset=1`，link6）计算得到，单位为米与弧度，与从臂 EEF 同一约定。该 DH 模型在实机数据上复现 firmware 自身末端位姿反馈：对 `playing_cards_2` 全部 100 episode（148892 帧）逐帧比较 FK(从臂关节) 与 `/observations/eef/puppet_*`，位置误差 mean 0.43 mm / 0.21 mm（左右臂）、p95 2.8 mm / 1.4 mm，姿态误差 mean 0.15° / 0.40°（大误差仅出现在高速运动的时间戳偏差与 pitch≈±90° 的 roll/yaw 简并点）。master EEF 使用同一代码路径，因此其约定与精度以该比较为准，不需要额外话题或改驱动。
+
+`metadata_json.eef.enabled` 标记 EEF 文件，`metadata_json.eef.master.source = "fk_from_master_joints"` 标记主臂 EEF 由 FK 推导（`kinematics.dh_is_offset = 1`、`link = "link6"`、`inputs = ["/action"]`）。两路 puppet EEF 的时间戳和同步误差位于 `/observations/sensor_timestamps/eef_puppet_left|right`、`/observations/sync_error/eef_puppet_left|right`；主臂 EEF 与 `action` 同帧同时间戳，因此不重复写入时间戳/误差，用 `/observations/sensor_timestamps/master_left|right` 即可。`validate_episode` 对声明了 `eef.master` 的文件强制要求四个 EEF 数据集；未声明的旧文件仍按两路 puppet EEF 校验。
+
+当前 `convert_ros2_piper_data_to_lerobot.py` 保持原行为，不会把这些原始 EEF 数据加入 LeRobot state；`export_episode_json.py` 也仍是 puppet-only 导出。
 
 将 EEF episode 转为 shifted LeRobot 数据集时，使用独立脚本；原始 HDF5 的 6D RPY 数据不会被修改：
 

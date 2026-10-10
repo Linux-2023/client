@@ -22,8 +22,10 @@ from sensor_msgs.msg import Image, JointState
 import yaml
 
 try:
+    from examples.piper_dual.ros2_contract import BridgeContract
     from examples.piper_dual.ros2_protocol import decode_message, encode_message
 except ModuleNotFoundError:
+    from ros2_contract import BridgeContract
     from ros2_protocol import decode_message, encode_message
 
 JsonObject = dict[str, Any]
@@ -101,6 +103,31 @@ def _validate_vectors(request: JsonObject, request_type: str) -> dict[str, list[
     return vectors
 
 
+def _make_joint_state(
+    values: list[float],
+    stamp: Any,
+    joint_names: tuple[str, ...],
+    speed_percent: int,
+    gripper_effort: float,
+) -> JointState:
+    """JointState action message mirroring the official bridge wire shape.
+
+    ``piper_ctrl_single_node`` reads ``velocity[6]`` as the motion speed percentage (clamped to
+    30..100) and ``effort[6]`` as the gripper force in N*m (clamped to 0.5..3); an empty
+    ``velocity``/``effort`` silently falls back to its own 30% / 1.0 N*m defaults.
+    """
+    if len(values) != len(joint_names):
+        raise ValueError("JointState values must contain exactly seven values")
+    message = JointState()
+    message.header.stamp.sec = int(stamp.sec)
+    message.header.stamp.nanosec = int(stamp.nanosec)
+    message.name = list(joint_names)
+    message.position = list(values)
+    message.velocity = [0.0] * (len(joint_names) - 1) + [float(speed_percent)]
+    message.effort = [0.0] * (len(joint_names) - 1) + [float(gripper_effort)]
+    return message
+
+
 class Writer:
     def __init__(self, stream: Any) -> None:
         self._stream = stream
@@ -149,16 +176,15 @@ class LocalPiperBridge(Node):
         self._bridge = cv_bridge.CvBridge()
         self._action_publishers: dict[str, Any] = {}
         qos = int(config.get("qos_depth", 1))
-        contract = config["bridge_contract"]
-        cameras = {entry["name"]: entry["topic"] for entry in config["cameras"]}
-        for sensor, topic in cameras.items():
+        self._contract = BridgeContract.from_mapping(config)
+        for sensor, topic in self._contract.image_topics.items():
             self.create_subscription(Image, topic, self._image_callback(sensor), qos)
-        for topic, sensor in contract["joint_topics"].items():
+        for topic, sensor in self._contract.joint_topics.items():
             self.create_subscription(JointState, topic, self._joint_callback(sensor), qos)
         if include_eef or eef_control:
             topics = {
-                "eef_puppet_left": eef_left_topic or contract["eef_topics"]["left"],
-                "eef_puppet_right": eef_right_topic or contract["eef_topics"]["right"],
+                "eef_puppet_left": eef_left_topic or self._contract.eef_topics["left"],
+                "eef_puppet_right": eef_right_topic or self._contract.eef_topics["right"],
             }
             for sensor, topic in topics.items():
                 self.create_subscription(PoseStamped, topic, self._eef_callback(sensor), qos)
@@ -170,7 +196,7 @@ class LocalPiperBridge(Node):
                 }
                 msg_type = PosCmd
             else:
-                topics = dict(contract["joint_action_topics"])
+                topics = dict(self._contract.joint_action_topics)
                 msg_type = JointState
             for arm, topic in topics.items():
                 self._action_publishers[arm] = self.create_publisher(msg_type, topic, qos)
@@ -256,12 +282,17 @@ class LocalPiperBridge(Node):
 
     def _publish_joint(self, vectors: dict[str, list[float]]) -> None:
         stamp = self.get_clock().now().to_msg()
+        control = self._contract.control
         for arm in ("left", "right"):
-            message = JointState()
-            message.header.stamp = stamp
-            message.name = [f"joint{i}" for i in range(7)]
-            message.position = vectors[arm]
-            self._action_publishers[arm].publish(message)
+            self._action_publishers[arm].publish(
+                _make_joint_state(
+                    vectors[arm],
+                    stamp,
+                    self._contract.joint_names,
+                    control.speed_percent,
+                    control.gripper_effort,
+                )
+            )
 
     def _publish_eef(self, vectors: dict[str, list[float]]) -> None:
         for arm in ("left", "right"):

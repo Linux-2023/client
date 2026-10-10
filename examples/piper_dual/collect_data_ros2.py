@@ -22,7 +22,6 @@ from observation_adapter import ObservationAdapter
 from ros2_backend import DEFAULT_SYNC_ERROR
 from ros2_backend import Ros2BackendClient
 from streaming_hdf5 import StreamingEpisodeWriter
-from streaming_hdf5 import validate_episode
 
 CAMERA_ORDER = tuple(IMAGE_SENSORS)
 DEFAULT_BRIDGE_PYTHON = Path("/usr/bin/python3")
@@ -109,8 +108,6 @@ class CollectorController:
         prompt: str,
         jpeg_quality: int = 90,
         writer_factory: Callable[..., StreamingEpisodeWriter] = StreamingEpisodeWriter.open,
-        validator: Callable[[Path], dict] = validate_episode,
-        report_sink: Callable[[dict], None] | None = None,
         preview: PreviewWindow | None = None,
         render_after_save: bool = False,
         renderer: Callable[[Path], None] | None = None,
@@ -123,8 +120,6 @@ class CollectorController:
         self.prompt = prompt
         self.jpeg_quality = int(jpeg_quality)
         self._writer_factory = writer_factory
-        self._validator = validator
-        self._report_sink = report_sink or _print_validation_report
         self._preview = preview
         self._render_after_save = bool(render_after_save)
         self._renderer = renderer or _render_episode
@@ -182,8 +177,6 @@ class CollectorController:
             return self._abort_current_episode(writer, str(exc), remove_partial=True)
         self._writer = None
         self._active_frame_count = 0
-        report = self._validator(final_path)
-        self._report_sink(report)
         if self._render_after_save:
             self._renderer(final_path)
         self._current_path = final_path
@@ -362,11 +355,6 @@ def main(argv: list[str] | None = None) -> int:
         controller.close()
         print("Interrupted; closed collector cleanly.")
     return 0
-
-
-def _print_validation_report(report: dict) -> None:
-    print("Validation report:")
-    print(json.dumps(report, indent=2, sort_keys=True, default=str))
 
 
 def _render_episode(path: Path) -> None:

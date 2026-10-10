@@ -30,10 +30,10 @@ class Args:
     """Arguments for the ROS 2-only dual-arm deployment."""
 
     out_dir: Path = Path("data/piper_dual/videos")
-    action_horizon: int = 18
-    fps: int = 30
-    actions_during_latency: int = 8
-    num_steps: int = 1600
+    action_horizon: int = 22
+    fps: int = 15
+    actions_during_latency: int = 5
+    num_steps: int = 16000
     num_episodes: int = 1
     run_tag: str = ""
     bridge_python: Path = DEFAULT_BRIDGE_PYTHON
@@ -44,7 +44,7 @@ class Args:
     max_action_delta: float | None = None
     host: str = "127.0.0.1"
     port: int = 8000
-    prompt: str = "Stack_the_paper_cups_together."
+    prompt: str = "Pass the playing cards and sunflower seeds to the guests."
     use_async: bool = True
     use_rtc: bool = True
 

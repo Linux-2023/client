@@ -1007,6 +1007,178 @@ _CONFIGS = [
         fsdp_devices=4,
     ),
     TrainConfig(
+        name="pi05_piper_dual_playing_cards_1_500_joint",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperDataConfig(
+            repo_id="HITdongdong/piper_dual_playing_cards_1_500_joint",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Pass the playing cards and sunflower seeds to the guests.",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                            "episode_index": "episode_index",
+                            "frame_index": "frame_index",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/agilex/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=16,
+        num_train_steps=200_000,
+        save_interval=20_000,
+        keep_period=20_000,
+        fsdp_devices=8,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_playing_cards_2_268_joint",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperDataConfig(
+            repo_id="HITdongdong/piper_dual_playing_cards_2_268_joint",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Clean up playing cards and the sunflower seed shells on the desk",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                            "episode_index": "episode_index",
+                            "frame_index": "frame_index",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/agilex/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=16,
+        num_train_steps=100_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=8,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_playing_cards_1_500_plus_2_268_joint",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperDataConfig(
+            repo_id="HITdongdong/piper_dual_playing_cards_1_500_plus_2_268_joint",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Clean up playing cards and the sunflower seed shells on the desk",
+            adapt_to_pi=False,
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                            "prompt": "prompt",
+                            "episode_index": "episode_index",
+                            "frame_index": "frame_index",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/agilex/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=16,
+        num_train_steps=200_000,
+        save_interval=20_000,
+        keep_period=20_000,
+        fsdp_devices=8,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_playing_cards_1_eef_xyz3d_shifted",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_playing_cards_1_eef_xyz3d_shifted",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Pass the playing cards and sunflower seeds to the guests.",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/agilex/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=50_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
+        name="pi05_piper_dual_playing_cards_2_eef_xyz3d_shifted",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperEefXyz3dDataConfig(
+            repo_id="HITdongdong/piper_dual_playing_cards_2_eef_xyz3d_shifted",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Clean up playing cards and the sunflower seed shells on the desk",
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/agilex/.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=128,
+        num_workers=0,
+        num_train_steps=50_000,
+        save_interval=10_000,
+        keep_period=10_000,
+        fsdp_devices=4,
+    ),
+    TrainConfig(
         name="pi05_piper_dual_stack_cups_eef_xyz3d_50",
         model=pi0_config.Pi0Config(
             pi05=True,

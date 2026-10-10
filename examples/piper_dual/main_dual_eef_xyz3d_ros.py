@@ -64,7 +64,8 @@ class Args:
     port: int = 8000
     # TODO
     # prompt: str = "Stack_the_paper_cups_together."
-    prompt: str = "Fold_the_towel."
+    # prompt: str = "Pass the playing cards and sunflower seeds to the guests."
+    prompt: str = "Clean up playing cards and the sunflower seed shells on the desk"
     # prompt: str = "Beat_the_drum_three_times."
     # prompt: str = "Weigh_the_apple."
     # prompt: str = "Put_the_block_in_the_drawer."

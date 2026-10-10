@@ -10,3 +10,6 @@
 [submodule "third_party/flexiv_usage"]
 	path = third_party/flexiv_usage
 	url = https://cnb.cool/THU-HiGroup/flexiv_usage
+[submodule "third_party/pyAgxArm"]
+	path = third_party/pyAgxArm
+	url = https://github.com/agilexrobotics/pyAgxArm.git

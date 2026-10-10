@@ -9,9 +9,14 @@ from typing import Any
 
 import numpy as np
 
+from master_eef import MasterEefKinematics
+
 IMAGE_SENSORS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 JOINT_SENSORS = ("puppet_left", "puppet_right", "master_left", "master_right")
 EEF_SENSORS = ("eef_puppet_left", "eef_puppet_right")
+EEF_PUPPET_ARMS = ("puppet_left", "puppet_right")
+EEF_MASTER_ARMS = ("master_left", "master_right")
+EEF_ARMS = EEF_PUPPET_ARMS + EEF_MASTER_ARMS
 REQUIRED_SENSORS = IMAGE_SENSORS + JOINT_SENSORS
 EEF_DIMENSION = 6
 JOINT_DIMENSION = 7
@@ -41,6 +46,7 @@ class FrameSynchronizer:
         self.max_error = self._validate_positive_float(max_error, "max_error")
         self.max_buffer_seconds = self._validate_positive_float(max_buffer_seconds, "max_buffer_seconds")
         self.include_eef = bool(include_eef)
+        self._master_eef = MasterEefKinematics() if self.include_eef else None
         self.required_sensors = REQUIRED_SENSORS + EEF_SENSORS if self.include_eef else REQUIRED_SENSORS
         self._buffers: dict[str, deque[_Sample]] = {sensor: deque() for sensor in self.required_sensors}
         self.accepted_frames = 0
@@ -155,9 +161,14 @@ class FrameSynchronizer:
         sync_error[reference_sensor] = 0.0
         eef = None
         if self.include_eef:
+            if self._master_eef is None:
+                raise RuntimeError("master EEF kinematics must be configured for EEF frames")
+            kinematics = self._master_eef
             eef = {
                 "puppet_left": np.asarray(selected["eef_puppet_left"].value, dtype=np.float32).copy(),
                 "puppet_right": np.asarray(selected["eef_puppet_right"].value, dtype=np.float32).copy(),
+                "master_left": kinematics.eef(master_left),
+                "master_right": kinematics.eef(master_right),
             }
         return SynchronizedFrame(
             timestamp=reference_timestamp,

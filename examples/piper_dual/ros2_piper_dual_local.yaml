@@ -8,6 +8,11 @@ model_image:
   channel_order: RGB
   layout: CHW
   dtype: uint8
+# 物理相机 → ROS 节点 → 话题 → 本文件键（串号与启动脚本见
+# /home/agilex/camera_ros/scripts/start_realsense_3cam_color.sh）：
+#   中间/高视角 : camera_f_l : /camera_f_l/color/image_raw : cam_high        ← 角色映射需现场确认
+#   左腕        : camera_l   : /camera_l/color/image_raw   : cam_left_wrist
+#   右腕        : camera_r   : /camera_r/color/image_raw   : cam_right_wrist
 cameras:
   - name: cam_high
     topic: /camera_f_l/color/image_raw
@@ -98,6 +103,6 @@ bridge_contract:
     - joint6
   control:
     speed_percent: 100
-    gripper_effort: 0.5
-    max_action_delta: 0.05
+    gripper_effort: 1
+    max_action_delta: 10
     status_watchdog_s: 0.5

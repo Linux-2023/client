@@ -134,18 +134,15 @@ def _read_video_frame_count(path: Path) -> int:
         capture.release()
 
 
-def _run_mock_collection_and_render(tmp_path: Path) -> tuple[Path, Path, dict[str, object], list[dict]]:
+def _run_mock_collection_and_render(tmp_path: Path) -> tuple[Path, Path, dict[str, object]]:
     backend = InProcessBridgeBackend(_ten_frame_bridge_events())
     backend.start()
-    reports: list[dict] = []
     controller = CollectorController(
         backend=backend,
         output_dir=tmp_path / "episodes",
         prompt="Fold the towel",
         jpeg_quality=90,
         writer_factory=StreamingEpisodeWriter.open,
-        validator=validate_episode,
-        report_sink=reports.append,
         preview=None,
         render_after_save=False,
     )
@@ -158,11 +155,11 @@ def _run_mock_collection_and_render(tmp_path: Path) -> tuple[Path, Path, dict[st
 
     render_dir = tmp_path / "rendered"
     render_report = render_episode(final_path, render_dir, fps=10, make_plots=False)
-    return final_path, render_dir, render_report, reports
+    return final_path, render_dir, render_report
 
 
 def test_ten_frame_mock_flow_writes_self_contained_hdf5_four_readable_videos_and_quality_report(tmp_path: Path) -> None:
-    final_path, render_dir, render_report, collection_reports = _run_mock_collection_and_render(tmp_path)
+    final_path, render_dir, render_report = _run_mock_collection_and_render(tmp_path)
 
     assert final_path == tmp_path / "episodes" / "episode_000000.hdf5"
     assert final_path.is_file()
@@ -171,7 +168,6 @@ def test_ten_frame_mock_flow_writes_self_contained_hdf5_four_readable_videos_and
     assert validation["errors"] == []
     assert validation["frame_count"] == 10
     assert validation["image_decode_counts"] == {camera: 10 for camera in IMAGE_SENSORS}
-    assert collection_reports[-1]["frame_count"] == 10
 
     with h5py.File(final_path, "r") as episode:
         assert episode.attrs["schema_version"] == SCHEMA_VERSION
@@ -211,7 +207,6 @@ def test_incomplete_frame_surfaces_explicit_eof_and_publishes_no_false_final_out
         output_dir=tmp_path,
         prompt="Fold the towel",
         writer_factory=StreamingEpisodeWriter.open,
-        validator=validate_episode,
         preview=None,
     )
 
@@ -226,7 +221,7 @@ def test_incomplete_frame_surfaces_explicit_eof_and_publishes_no_false_final_out
     assert not (tmp_path / "episode_000000.hdf5.partial").exists()
 
 
-def test_malformed_jpeg_fails_finalization_explicitly_and_publishes_no_false_final_output(tmp_path: Path, capsys) -> None:
+def test_malformed_jpeg_is_published_by_the_structural_gate_and_reported_by_full_validation(tmp_path: Path) -> None:
     events = _ten_frame_bridge_events()[: len(SENSOR_ORDER)]
     for event in events:
         if event.get("sensor") == "cam_left_wrist":
@@ -238,7 +233,6 @@ def test_malformed_jpeg_fails_finalization_explicitly_and_publishes_no_false_fin
         output_dir=tmp_path,
         prompt="Fold the towel",
         writer_factory=StreamingEpisodeWriter.open,
-        validator=validate_episode,
         preview=None,
     )
 
@@ -247,13 +241,14 @@ def test_malformed_jpeg_fails_finalization_explicitly_and_publishes_no_false_fin
     result = controller.stop_episode()
     controller.close()
 
-    assert result == Path()
-    output = capsys.readouterr().out
-    assert "Failed to finalize" in output
-    assert "cam_left_wrist" in output
-    assert "not decodable JPEG bytes" in output
-    assert not (tmp_path / "episode_000000.hdf5").exists()
-    assert not (tmp_path / "episode_000000.hdf5.partial").exists()
+    # Per-episode finalize checks structure only, so undecodable camera bytes no longer block it.
+    final_path = tmp_path / "episode_000000.hdf5"
+    assert result == final_path
+    assert final_path.is_file()
+
+    report = validate_episode(final_path)
+    assert report["image_decode_counts"]["cam_left_wrist"] == 0
+    assert any("cam_left_wrist" in error and "not decodable JPEG bytes" in error for error in report["errors"])
 
 
 def test_stale_timestamp_surfaces_explicit_eof_and_does_not_emit_or_publish_partial_frame(tmp_path: Path) -> None:
@@ -269,7 +264,6 @@ def test_stale_timestamp_surfaces_explicit_eof_and_does_not_emit_or_publish_part
         output_dir=tmp_path,
         prompt="Fold the towel",
         writer_factory=StreamingEpisodeWriter.open,
-        validator=validate_episode,
         preview=None,
     )
 
@@ -293,7 +287,6 @@ def test_bridge_eof_after_some_frames_aborts_open_writer_with_no_false_final_out
         output_dir=tmp_path,
         prompt="Fold the towel",
         writer_factory=StreamingEpisodeWriter.open,
-        validator=validate_episode,
         preview=None,
     )
 
@@ -335,7 +328,6 @@ def test_interrupted_finalization_aborts_partial_and_does_not_publish_final_outp
         output_dir=tmp_path,
         prompt="Fold the towel",
         writer_factory=writer_factory,
-        validator=validate_episode,
         preview=None,
     )
 

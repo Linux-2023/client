@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Preview-first ROS 2 collector for Piper dual-arm EEF episodes."""
+"""Preview-first ROS 2 collector for Piper dual-arm EEF episodes.
+
+Puppet EEF poses come from the ROS 2 bridge; master EEF poses are derived from the
+synchronized master joint row with the vendored Piper forward kinematics.
+"""
 
 from __future__ import annotations
 
@@ -9,16 +13,12 @@ from pathlib import Path
 from collect_data_ros2 import DEFAULT_BRIDGE_PYTHON
 from collect_data_ros2 import DEFAULT_FRAME_TIMEOUT_SECONDS
 from collect_data_ros2 import CollectorController
-from collect_data_ros2 import CollectorState
 from collect_data_ros2 import PreviewWindow
-from collect_data_ros2 import _print_validation_report
-from collect_data_ros2 import _render_episode
 from collect_data_ros2 import run_collection_loop
+from master_eef import DH_IS_OFFSET
 from observation_adapter import ObservationAdapter
 from ros2_backend import DEFAULT_SYNC_ERROR
 from ros2_backend import Ros2BackendClient
-from streaming_hdf5 import StreamingEpisodeWriter
-from streaming_hdf5 import validate_episode
 
 DEFAULT_EEF_LEFT_TOPIC = "/puppet/end_pose_left"
 DEFAULT_EEF_RIGHT_TOPIC = "/puppet/end_pose_right"
@@ -28,7 +28,7 @@ EEF_UNITS = ["m", "m", "m", "rad", "rad", "rad"]
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Preview synchronized Piper dual ROS 2 frames and save joint plus puppet EEF HDF5 episodes."
+        description="Preview synchronized Piper dual ROS 2 frames and save joint plus puppet and master EEF HDF5 episodes."
     )
     parser.add_argument("--output-dir", required=True, type=Path, help="Directory for episode_XXXXXX.hdf5 outputs")
     parser.add_argument("--prompt", required=True, help="Task prompt stored in each episode metadata")
@@ -127,6 +127,19 @@ def create_controller(args: argparse.Namespace) -> CollectorController:
                 "order": list(EEF_ORDER),
                 "units": list(EEF_UNITS),
                 "representation": "xyz_rpy",
+                "master": {
+                    "source": "fk_from_master_joints",
+                    "inputs": ["/action"],
+                    "order": list(EEF_ORDER),
+                    "units": list(EEF_UNITS),
+                    "representation": "xyz_rpy",
+                    "kinematics": {
+                        "model": "piper",
+                        "vendor": "piper_sdk.kinematics.C_PiperForwardKinematics",
+                        "link": "link6",
+                        "dh_is_offset": DH_IS_OFFSET,
+                    },
+                },
             }
         },
         writer_options={"include_eef": True},
@@ -136,7 +149,7 @@ def create_controller(args: argparse.Namespace) -> CollectorController:
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     controller = create_controller(args)
-    print("Previewing synchronized ROS 2 frames with puppet EEF. Press s to record; while recording, s or e finalize; q to quit.")
+    print("Previewing synchronized ROS 2 frames with puppet and master EEF. Press s to record; while recording, s or e finalize; q to quit.")
     try:
         run_collection_loop(controller, frame_timeout=DEFAULT_FRAME_TIMEOUT_SECONDS)
     except KeyboardInterrupt:

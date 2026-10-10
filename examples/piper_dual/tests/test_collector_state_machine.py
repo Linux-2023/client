@@ -128,20 +128,15 @@ def make_controller(
     writer_factory: RecordingWriterFactory | None = None,
     preview: FakePreview | None = None,
     renderer=None,
-    reports: list[dict] | None = None,
-    validator=None,
     render_after_save: bool = False,
 ) -> CollectorController:
     writer_factory = writer_factory or RecordingWriterFactory()
-    reports = reports if reports is not None else []
     return CollectorController(
         backend=backend or FakeBackend(),
         output_dir=tmp_path,
         prompt="Fold the towel",
         jpeg_quality=77,
         writer_factory=writer_factory,
-        validator=validator or (lambda path: {"frame_count": 0, "errors": [], "path": str(path)}),
-        report_sink=reports.append,
         preview=preview or FakePreview(),
         render_after_save=render_after_save or renderer is not None,
         renderer=renderer,
@@ -189,8 +184,7 @@ def test_s_clears_buffers_before_opening_partial_and_appends_only_while_recordin
     events: list[str] = []
     backend = FakeBackend(events=events)
     writer_factory = RecordingWriterFactory(events)
-    reports: list[dict] = []
-    controller = make_controller(tmp_path, backend=backend, writer_factory=writer_factory, reports=reports)
+    controller = make_controller(tmp_path, backend=backend, writer_factory=writer_factory)
 
     controller.process_frame(make_frame(0))
     assert writer_factory.writers == []
@@ -208,7 +202,6 @@ def test_s_clears_buffers_before_opening_partial_and_appends_only_while_recordin
 
     assert controller.handle_key("s") is CollectorState.PREVIEW
     assert writer.finalized is True
-    assert reports == [{"frame_count": 0, "errors": [], "path": str(writer.final_path)}]
 
     controller.process_frame(make_frame(3))
     assert [frame.timestamp for frame in writer.appended] == [1.0, 2.0]
@@ -217,8 +210,7 @@ def test_s_clears_buffers_before_opening_partial_and_appends_only_while_recordin
 
 def test_s_toggles_recording_and_finalizes_episode(tmp_path: Path) -> None:
     writer_factory = RecordingWriterFactory()
-    reports: list[dict] = []
-    controller = make_controller(tmp_path, writer_factory=writer_factory, reports=reports)
+    controller = make_controller(tmp_path, writer_factory=writer_factory)
 
     assert controller.handle_key("s") is CollectorState.RECORDING
     controller.process_frame(make_frame(1))
@@ -226,17 +218,13 @@ def test_s_toggles_recording_and_finalizes_episode(tmp_path: Path) -> None:
 
     writer = writer_factory.writers[0]
     assert writer.finalized is True
-    assert reports == [{"frame_count": 0, "errors": [], "path": str(writer.final_path)}]
 
 def test_e_finalizes_recording_episode_with_real_writer_and_preserves_preview_noop(tmp_path: Path, capsys) -> None:
     backend = FakeBackend()
-    reports: list[dict] = []
     controller = make_controller(
         tmp_path,
         backend=backend,
         writer_factory=StreamingEpisodeWriter.open,
-        reports=reports,
-        validator=validate_episode,
     )
 
     assert controller.handle_key("e") is CollectorState.PREVIEW
@@ -251,7 +239,6 @@ def test_e_finalizes_recording_episode_with_real_writer_and_preserves_preview_no
     assert validate_episode(final_path)["errors"] == []
     assert controller.state is CollectorState.PREVIEW
     assert controller.writer_open is False
-    assert reports[-1]["frame_count"] == 1
     assert backend.close_calls == 0
     output = capsys.readouterr().out
     assert "Finalized" in output
@@ -283,13 +270,10 @@ def test_empty_real_writer_episode_restores_preview_keeps_backend_and_next_valid
     tmp_path: Path, capsys
 ) -> None:
     backend = FakeBackend()
-    reports: list[dict] = []
     controller = make_controller(
         tmp_path,
         backend=backend,
         writer_factory=StreamingEpisodeWriter.open,
-        reports=reports,
-        validator=validate_episode,
     )
 
     assert controller.handle_key("s") is CollectorState.RECORDING
@@ -302,7 +286,6 @@ def test_empty_real_writer_episode_restores_preview_keeps_backend_and_next_valid
     assert backend.close_calls == 0
     assert not final_path.exists()
     assert not partial_path.exists()
-    assert reports == []
     output = capsys.readouterr().out
     assert "Failed to finalize" in output
     assert "zero frames" in output
@@ -314,7 +297,6 @@ def test_empty_real_writer_episode_restores_preview_keeps_backend_and_next_valid
     next_final_path = tmp_path / "episode_000001.hdf5"
     assert next_final_path.exists()
     assert validate_episode(next_final_path)["errors"] == []
-    assert reports[-1]["frame_count"] == 1
     assert backend.close_calls == 0
 
 
@@ -322,17 +304,15 @@ def test_real_writer_validation_failure_restores_preview_removes_partial_and_all
     tmp_path: Path, capsys
 ) -> None:
     backend = FakeBackend()
-    reports: list[dict] = []
     controller = make_controller(
         tmp_path,
         backend=backend,
         writer_factory=StreamingEpisodeWriter.open,
-        reports=reports,
-        validator=validate_episode,
     )
 
     assert controller.handle_key("s") is CollectorState.RECORDING
-    controller.process_frame(make_frame(11))
+    controller.process_frame(render_frame(2))
+    controller.process_frame(render_frame(1))
     assert controller.handle_key("s") is CollectorState.PREVIEW
 
     failed_final_path = tmp_path / "episode_000000.hdf5"
@@ -342,10 +322,9 @@ def test_real_writer_validation_failure_restores_preview_removes_partial_and_all
     assert backend.close_calls == 0
     assert not failed_final_path.exists()
     assert not failed_partial_path.exists()
-    assert reports == []
     output = capsys.readouterr().out
     assert "Failed to finalize" in output
-    assert "not decodable JPEG bytes" in output
+    assert "nondecreasing" in output
 
     assert controller.handle_key("s") is CollectorState.RECORDING
     controller.process_frame(render_frame(12))
@@ -354,7 +333,6 @@ def test_real_writer_validation_failure_restores_preview_removes_partial_and_all
     next_final_path = tmp_path / "episode_000001.hdf5"
     assert next_final_path.exists()
     assert validate_episode(next_final_path)["errors"] == []
-    assert reports[-1]["frame_count"] == 1
     assert backend.close_calls == 0
 
 def test_q_aborts_open_partial_and_closes_backend_without_publishing_actions(tmp_path: Path) -> None:
@@ -609,39 +587,6 @@ def test_create_controller_applies_max_sync_error_to_backend_synchronizer(tmp_pa
 def test_render_after_save_uses_self_contained_hdf5_schema_and_returns_to_preview(tmp_path: Path, monkeypatch) -> None:
     opened: list[object] = []
 
-    class FakeRenderBackend(FakeBackend):
-        def __init__(self) -> None:
-            super().__init__()
-            self.action_adapter = object()
-            self.synchronizer = type("Sync", (), {"include_eef": False})()
-
-    monkeypatch.setattr(collect_data_ros2, "render_episode", lambda path, output_dir: opened.append((path, output_dir)))
-    monkeypatch.setattr(collect_data_ros2, "validate_episode", lambda path: {"frame_count": 1, "errors": [], "path": str(path)})
-
-    backend = FakeRenderBackend()
-    preview = FakePreview()
-    controller = CollectorController(
-        backend=backend,
-        output_dir=tmp_path,
-        prompt="Fold the towel",
-        jpeg_quality=90,
-        preview=preview,
-        render_after_save=True,
-    )
-    controller._writer_factory = RecordingWriterFactory()
-
-    controller.start_episode()
-    controller.process_frame(make_frame(1))
-    controller.stop_episode()
-
-    assert opened
-    assert controller.state is collect_data_ros2.CollectorState.PREVIEW
-    assert backend.close_calls == 0
-
-
-def test_render_after_save_uses_self_contained_hdf5_schema_and_returns_to_preview(tmp_path: Path, monkeypatch) -> None:
-    opened: list[object] = []
-
     class FakeVideoWriter:
         def __init__(self, path, fourcc, fps, size) -> None:
             self.path = Path(path)
@@ -669,7 +614,6 @@ def test_render_after_save_uses_self_contained_hdf5_schema_and_returns_to_previe
         backend=backend,
         writer_factory=StreamingEpisodeWriter.open,
         preview=FakePreview(),
-        validator=validate_episode,
         render_after_save=True,
     )
 

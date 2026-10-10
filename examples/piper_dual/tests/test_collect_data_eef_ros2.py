@@ -142,6 +142,10 @@ def test_eef_create_controller_passes_topics_and_sync_limit(tmp_path: Path, monk
     assert created[0].max_sync_error == pytest.approx(0.0125)
     assert created[0].synchronizer.max_error == pytest.approx(0.0125)
 
+    # Starting an episode opens the real writer, so the collector metadata must satisfy its EEF contract.
+    controller.start_episode()
+    controller.close()
+
 
 def test_eef_controller_writes_eef_metadata_and_enables_writer(tmp_path: Path):
     backend = FakeBackend(eef_left_topic="/left", eef_right_topic="/right")
@@ -159,6 +163,11 @@ def test_eef_controller_writes_eef_metadata_and_enables_writer(tmp_path: Path):
                 "topics": {"puppet_left": "/left", "puppet_right": "/right"},
                 "order": ["x", "y", "z", "roll", "pitch", "yaw"],
                 "units": ["m", "m", "m", "rad", "rad", "rad"],
+                "master": {
+                    "source": "fk_from_master_joints",
+                    "inputs": ["/action"],
+                    "kinematics": {"dh_is_offset": 1},
+                },
             }
         },
         writer_options={"include_eef": True},
@@ -171,6 +180,7 @@ def test_eef_controller_writes_eef_metadata_and_enables_writer(tmp_path: Path):
     assert writer.metadata["collector"] == "collect_data_eef_ros2.py"
     assert writer.metadata["eef"]["enabled"] is True
     assert writer.metadata["eef"]["topics"]["puppet_left"] == "/left"
+    assert writer.metadata["eef"]["master"]["source"] == "fk_from_master_joints"
 
     controller.close()
 

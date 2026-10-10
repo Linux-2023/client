@@ -12,7 +12,9 @@ import cv2
 import h5py
 import numpy as np
 
+from frame_synchronizer import EEF_ARMS
 from frame_synchronizer import EEF_DIMENSION
+from frame_synchronizer import EEF_PUPPET_ARMS
 from frame_synchronizer import EEF_SENSORS
 from frame_synchronizer import FRAME_DIMENSION
 from frame_synchronizer import IMAGE_SENSORS
@@ -67,6 +69,8 @@ class StreamingEpisodeWriter:
         metadata_eef_enabled = isinstance(eef_metadata, dict) and eef_metadata.get("enabled") is True
         if bool(include_eef) != metadata_eef_enabled:
             raise ValueError("metadata eef.enabled must match include_eef")
+        if include_eef and _master_eef_source(metadata) is None:
+            raise ValueError("metadata eef.master.source must be declared for EEF episodes")
 
         required_sensors = REQUIRED_SENSORS + EEF_SENSORS if include_eef else REQUIRED_SENSORS
         partial_path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,8 +116,8 @@ class StreamingEpisodeWriter:
         for camera, image_bytes in images.items():
             self._file[f"{IMAGE_GROUP_PATH}/{camera}"][index] = np.frombuffer(image_bytes, dtype=np.uint8).copy()
         if eef is not None:
-            self._file[f"{EEF_GROUP_PATH}/puppet_left"][index] = eef["puppet_left"]
-            self._file[f"{EEF_GROUP_PATH}/puppet_right"][index] = eef["puppet_right"]
+            for arm in EEF_ARMS:
+                self._file[f"{EEF_GROUP_PATH}/{arm}"][index] = eef[arm]
         for sensor in self._required_sensors:
             self._file[f"{SENSOR_TIMESTAMPS_GROUP_PATH}/{sensor}"][index] = np.float32(sensor_timestamps[sensor])
             self._file[f"{SYNC_ERROR_GROUP_PATH}/{sensor}"][index] = np.float32(sync_error[sensor])
@@ -130,7 +134,12 @@ class StreamingEpisodeWriter:
         self._file.flush()
 
     def finalize(self) -> Path:
-        """Close, validate, and atomically publish the partial HDF5 file."""
+        """Close, structurally validate, and atomically publish the partial HDF5 file.
+
+        The per-episode gate checks dataset presence, shapes, dtypes, extendibility, finiteness
+        and timestamp monotonicity, but does not decode every stored JPEG; full validation with
+        ``validate_episode(path)`` stays available offline.
+        """
         self._ensure_open()
         self._file.attrs["frame_count"] = self._frame_count
         self._write_timing_counters(finalized=True)
@@ -138,7 +147,7 @@ class StreamingEpisodeWriter:
         self._file.close()
         self._closed = True
 
-        report = validate_episode(self.partial_path)
+        report = validate_episode(self.partial_path, decode_images=False)
         if report["errors"]:
             raise ValueError(f"episode validation failed: {report['errors']}")
         self.partial_path.replace(self.final_path)
@@ -159,8 +168,8 @@ class StreamingEpisodeWriter:
         for camera in IMAGE_SENSORS:
             self._file[f"{IMAGE_GROUP_PATH}/{camera}"].resize((size,))
         if self._include_eef:
-            self._file[f"{EEF_GROUP_PATH}/puppet_left"].resize((size, EEF_DIMENSION))
-            self._file[f"{EEF_GROUP_PATH}/puppet_right"].resize((size, EEF_DIMENSION))
+            for arm in EEF_ARMS:
+                self._file[f"{EEF_GROUP_PATH}/{arm}"].resize((size, EEF_DIMENSION))
         for sensor in self._required_sensors:
             self._file[f"{SENSOR_TIMESTAMPS_GROUP_PATH}/{sensor}"].resize((size,))
             self._file[f"{SYNC_ERROR_GROUP_PATH}/{sensor}"].resize((size,))
@@ -178,8 +187,13 @@ class StreamingEpisodeWriter:
             raise RuntimeError("StreamingEpisodeWriter is closed")
 
 
-def validate_episode(path: Path) -> dict:
-    """Return frame counts, schema info, decode counts, monotonicity, and validation errors."""
+def validate_episode(path: Path, *, decode_images: bool = True) -> dict:
+    """Return frame counts, schema info, decode counts, monotonicity, and validation errors.
+
+    ``decode_images=False`` keeps every structural check but skips the per-frame JPEG decode,
+    which dominates validation time (~26 s versus ~0.6 s for an 1818-frame episode). The
+    collector uses it for the per-episode finalize gate; offline tools keep the full check.
+    """
     report = {
         "frame_count": 0,
         "schema_version": None,
@@ -189,7 +203,7 @@ def validate_episode(path: Path) -> dict:
     }
     try:
         with h5py.File(path, "r") as episode:
-            _validate_open_episode(episode, report)
+            _validate_open_episode(episode, report, decode_images=decode_images)
     except OSError as exc:
         report["errors"].append(f"could not open HDF5 file: {exc}")
     return report
@@ -249,7 +263,7 @@ def _initialize_file(
         image_group.create_dataset(camera, shape=(0,), maxshape=(None,), chunks=(1,), dtype=vlen_uint8)
     if include_eef:
         eef_group = observations.create_group("eef")
-        for arm in ("puppet_left", "puppet_right"):
+        for arm in EEF_ARMS:
             eef_group.create_dataset(
                 arm,
                 shape=(0, EEF_DIMENSION),
@@ -265,7 +279,7 @@ def _initialize_file(
         sync_error.create_dataset(sensor, shape=(0,), maxshape=(None,), chunks=(1,), dtype=np.float32)
 
 
-def _validate_open_episode(episode: h5py.File, report: dict) -> None:
+def _validate_open_episode(episode: h5py.File, report: dict, *, decode_images: bool = True) -> None:
     schema_version = episode.attrs.get("schema_version")
     report["schema_version"] = _decode_attr(schema_version)
     if report["schema_version"] != SCHEMA_VERSION:
@@ -311,6 +325,8 @@ def _validate_open_episode(episode: h5py.File, report: dict) -> None:
             report["errors"].append(f"{dataset_path} is not one-dimensional and extendible")
         if h5py.check_dtype(vlen=dataset.dtype) != np.dtype("uint8"):
             report["errors"].append(f"{dataset_path} must use vlen uint8 JPEG storage")
+        if not decode_images:
+            continue
         decode_count = 0
         for index, encoded in enumerate(dataset):
             if _decode_jpeg_array(encoded):
@@ -338,19 +354,41 @@ def _validate_open_episode(episode: h5py.File, report: dict) -> None:
 
 
 def _metadata_eef_enabled(episode: h5py.File) -> bool:
+    return _eef_metadata(_metadata_json(episode)).get("enabled") is True
+
+
+def _metadata_master_eef_declared(episode: h5py.File) -> bool:
+    return _master_eef_source(_metadata_json(episode)) is not None
+
+
+def _metadata_json(episode: h5py.File) -> dict:
+    """Return the decoded episode metadata mapping, or an empty mapping."""
     raw_metadata = _decode_attr(episode.attrs.get("metadata_json"))
     if not isinstance(raw_metadata, str):
-        return False
+        return {}
     try:
         metadata = json.loads(raw_metadata)
     except json.JSONDecodeError:
-        return False
+        return {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _eef_metadata(metadata: object) -> dict:
+    """Return the ``eef`` metadata mapping from a decoded metadata payload."""
     eef = metadata.get("eef") if isinstance(metadata, dict) else None
-    return isinstance(eef, dict) and eef.get("enabled") is True
+    return eef if isinstance(eef, dict) else {}
+
+
+def _master_eef_source(metadata: object) -> str | None:
+    """Return the declared master EEF source, if the metadata declares one."""
+    master = _eef_metadata(metadata).get("master")
+    source = master.get("source") if isinstance(master, dict) else None
+    return source if isinstance(source, str) and source else None
 
 
 def _validate_eef_datasets(episode: h5py.File, frame_count: int, report: dict) -> None:
-    for arm in ("puppet_left", "puppet_right"):
+    arms = EEF_ARMS if _metadata_master_eef_declared(episode) else EEF_PUPPET_ARMS
+    for arm in arms:
         dataset_path = f"{EEF_GROUP_PATH}/{arm}"
         dataset = _get_dataset(episode, dataset_path, report)
         if dataset is None:
@@ -394,10 +432,10 @@ def _coerce_vector(value: Any, field: str) -> np.ndarray:
 
 
 def _coerce_eef(value: dict[str, Any] | None) -> dict[str, np.ndarray]:
-    if not isinstance(value, dict) or set(value) != {"puppet_left", "puppet_right"}:
-        raise ValueError("EEF data must contain exactly puppet_left and puppet_right")
+    if not isinstance(value, dict) or set(value) != set(EEF_ARMS):
+        raise ValueError(f"EEF data must contain exactly {', '.join(EEF_ARMS)}")
     result: dict[str, np.ndarray] = {}
-    for arm in ("puppet_left", "puppet_right"):
+    for arm in EEF_ARMS:
         vector = np.asarray(value[arm], dtype=np.float32)
         if vector.shape != (EEF_DIMENSION,):
             raise ValueError(f"EEF {arm} must contain exactly six values")
