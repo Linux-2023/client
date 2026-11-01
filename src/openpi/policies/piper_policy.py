@@ -40,6 +40,7 @@ class PiperInputs(transforms.DataTransformFn):
     EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("cam_high", "cam_low", "cam_left_wrist", "cam_right_wrist")
 
     def __call__(self, data: dict) -> dict:
+        transforms.validate_training_rtc_payload(data)
         data = _decode_aloha(data, adapt_to_pi=self.adapt_to_pi)
 
         in_images = data["images"]
@@ -80,6 +81,11 @@ class PiperInputs(transforms.DataTransformFn):
             actions = np.asarray(data["actions"])
             actions = _encode_actions_inv(actions, adapt_to_pi=self.adapt_to_pi)
             inputs["actions"] = actions.copy()
+        if "training_rtc" in data:
+            prefix = _encode_actions_inv(
+                np.asarray(data["training_rtc"]["action_prefix"]), adapt_to_pi=self.adapt_to_pi
+            )
+            inputs["training_rtc"] = {"action_prefix": prefix.copy()}
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]

@@ -28,11 +28,26 @@ class CommittedRtcPolicy:
     def __init__(self, policy, planner, *, horizon=22, model_horizon=50,
                  actions_during_latency=5, prefetch_seconds=.4,
                  commit_seconds=.1, planning_margin=.05, plan_budget=.2,
-                 soft_prefix_steps=3, metrics_path=None, clock=time.monotonic):
+                 soft_prefix_steps=3, training_rtc=False, metrics_path=None, clock=time.monotonic):
         if not 0 < horizon < model_horizon:
             raise ValueError('Require 0 < action horizon < model horizon')
-        if not 1 <= soft_prefix_steps < model_horizon-2:
-            raise ValueError('RTC soft prefix must leave room for committed and new actions')
+        self.training_rtc = bool(training_rtc)
+        if self.training_rtc:
+            from openpi_client.action_chunk_broker import TRAINING_RTC_MODEL_FPS, validate_training_rtc_capability
+            get_metadata = getattr(policy, 'get_server_metadata', None)
+            capability = validate_training_rtc_capability(get_metadata() if callable(get_metadata) else {})
+            if model_horizon != capability['action_horizon']:
+                raise ValueError('Training-RTC model horizon must match server action_horizon=50')
+            if planner.path_fps != TRAINING_RTC_MODEL_FPS:
+                raise ValueError('Training-RTC model grid must be 30 Hz; use --topp-path-fps 30')
+            if not 0 <= actions_during_latency < capability['max_prefix_steps']:
+                raise ValueError('Training-RTC TOPP delay must leave one prefix row for the handoff anchor')
+            self.max_commit_steps = capability['max_prefix_steps'] - 1
+            soft_prefix_steps = 0  # No legacy soft-prefix guidance in this mode.
+        else:
+            if not 1 <= soft_prefix_steps < model_horizon-2:
+                raise ValueError('RTC soft prefix must leave room for committed and new actions')
+            self.max_commit_steps = model_horizon-soft_prefix_steps-2
         if not 0 <= actions_during_latency < model_horizon-soft_prefix_steps-1:
             raise ValueError('RTC initial delay is too long for the model horizon')
         if any(not np.isfinite(x) or x < 0 for x in
@@ -53,13 +68,17 @@ class CommittedRtcPolicy:
                                   math.gcd(output_dt.denominator, model_dt.denominator))
         self.model_stride = int(self.common_dt/model_dt)
         self.output_stride = int(self.common_dt/output_dt)
-        if self.model_stride >= model_horizon-soft_prefix_steps-1:
-            raise ValueError('Model/output frequencies have no usable common handoff tick')
+        if self.model_stride > self.max_commit_steps:
+            raise ValueError('Model/output frequencies have no usable common handoff tick within the prefix bound')
         self.latencies = deque(maxlen=10)
         self.plan_times = deque(maxlen=10)
         self.thread = self.future = None
         self.closed = False
         self._clear()
+    def get_server_metadata(self):
+        getter = getattr(self.policy, 'get_server_metadata', None)
+        return getter() if callable(getter) else {}
+
 
     def _clear(self):
         self.tick = self.origin_tick = self.request_at_tick = 0
@@ -68,6 +87,7 @@ class CommittedRtcPolicy:
         self.moving_retries = 0
         self.last_plan_ms = 0.0
         self.last_call_wall = None
+        self.training_cold = True
 
     def _log(self, **event):
         logging.info('TOPP committed %s', event)
@@ -90,7 +110,7 @@ class CommittedRtcPolicy:
         planning = max(self.plan_budget, max(self.plan_times, default=0))
         seconds = max(self.commit_seconds, inference+planning+self.planning_margin)
         multiples = max(1, math.ceil(seconds/float(self.common_dt)))
-        maximum = (self.model_horizon-self.soft_prefix_steps-2)//self.model_stride
+        maximum = self.max_commit_steps//self.model_stride
         saturated = multiples > maximum
         multiples = min(multiples, maximum)
         return multiples*self.output_stride, multiples*self.model_stride, saturated
@@ -99,18 +119,25 @@ class CommittedRtcPolicy:
         ticks, d, saturated = self._commit_window()
         target_tick = self.tick+ticks
         q, v = self._state_at(target_tick)
+        count = (0 if self.training_cold else d+1) if self.training_rtc else self.model_horizon
         if self.trajectory is None:
-            prefix = np.repeat(self.q[None, :], self.model_horizon, axis=0)
+            prefix = np.repeat(self.q[None, :], count, axis=0)
         else:
-            times = (self.tick-self.origin_tick)/self.planner.fps + np.arange(self.model_horizon)/self.planner.path_fps
+            times = (self.tick-self.origin_tick)/self.planner.fps + np.arange(count)/self.planner.path_fps
             prefix = self.trajectory(np.clip(times, 0, self.trajectory.duration))
-        # s controls H-s soft-prefix length in the local RTC server; it is NOT
-        # the number of points we retain for the new TOPP plan.
-        s = self.model_horizon-(d+self.soft_prefix_steps)
         obs = copy.deepcopy(observation)
-        obs['rtc_obs'] = {'prev_action': np.asarray(prefix, dtype=np.float32),
-                          'prev_state': vector(observation['state']).astype(np.float32),
-                          's': s, 'd': d}
+        if self.training_rtc:
+            obs.pop('rtc_obs', None)
+            obs.pop('prev_action', None)
+            obs['training_rtc'] = {'action_prefix': np.asarray(prefix, dtype=np.float32).reshape(count, 14)}
+            self.training_cold = False
+            s = None
+        else:
+            # s controls H-s soft-prefix length, not retained TOPP waypoints.
+            s = self.model_horizon-(d+self.soft_prefix_steps)
+            obs['rtc_obs'] = {'prev_action': np.asarray(prefix, dtype=np.float32),
+                              'prev_state': vector(observation['state']).astype(np.float32),
+                              's': s, 'd': d}
         self.job = dict(target_tick=target_tick, request_tick=self.tick, d=d, q=q, v=v)
         self._log(event='request', rtc_s=s, rtc_d=d, target_tick=target_tick,
                   committed_s=ticks/self.planner.fps, budget_saturated=saturated,
@@ -122,6 +149,10 @@ class CommittedRtcPolicy:
             try:
                 # Server/network errors remain fatal, distinct from infeasible plans.
                 result = self.policy.infer(obs)
+                if self.training_rtc:
+                    actions = np.asarray(result['actions'])
+                    if actions.shape != (self.model_horizon, 14) or not np.isfinite(actions).all():
+                        raise ValueError('Training-RTC server must return finite (50,14) actions')
                 inference_s = self.clock()-begin
             except BaseException as exc:
                 future.set_exception(exc)

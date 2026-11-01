@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import pathlib
@@ -14,6 +15,42 @@ from openpi.training import config as _config
 import openpi.transforms as transforms
 
 _RPY_INDICES = np.array([[3, 4, 5], [10, 11, 12]])
+
+def _training_rtc_capability(
+    train_config: _config.TrainConfig, checkpoint_dir: pathlib.Path, *, is_pytorch: bool
+) -> dict[str, Any] | None:
+    """Require both the supported serving preset and the checkpoint's own training declaration."""
+    if not is_pytorch or train_config.name != "pi05_piper_dual_tidy_desk_ros2_shifted_pytorch":
+        return None
+    config_path = checkpoint_dir / "config.json"
+    if not config_path.is_file():
+        return None
+    with config_path.open() as stream:
+        checkpoint_config = json.load(stream)
+    if not isinstance(checkpoint_config, dict) or checkpoint_config.get("train_time_rtc") is not True:
+        return None
+    data = train_config.data
+    model = train_config.model
+    if not (
+        isinstance(data, _config.LeRobotPiperDataConfig)
+        and data.use_delta_joint_actions
+        and not data.adapt_to_pi
+        and data.output_action_dim == 14
+        and model.model_type == _model.ModelType.PI05
+        and model.action_dim == 32
+        and model.action_horizon == 50
+        and model.discrete_state_input is False
+        and (train_config.policy_metadata or {}).get("trained_with_rtc") is True
+        and checkpoint_config.get("train_time_rtc_action_dim") == 14
+        and checkpoint_config.get("action_horizon") == 50
+        and checkpoint_config.get("action_dim") == 32
+        and checkpoint_config.get("discrete_state_input") is False
+        and checkpoint_config.get("train_time_rtc_max_prefix_frac") == 0.3
+        and checkpoint_config.get("use_gp_prior", False) is False
+        and checkpoint_config.get("use_gpr", False) is False
+    ):
+        raise ValueError("Checkpoint Training-RTC contract is incompatible with the Piper 14D/50-step preset")
+    return {"supported": True, "max_prefix_steps": 15, "action_horizon": 50, "action_dim": 14}
 
 
 def _rtc_rpy_affine(
@@ -112,11 +149,13 @@ def create_trained_policy(
     is_pytorch = os.path.exists(weight_path)
     if rtc_orientation_mode != "legacy" and not is_pytorch:
         raise ValueError("RTC orientation guidance requires a PyTorch checkpoint containing model.safetensors.")
+    training_rtc = _training_rtc_capability(train_config, pathlib.Path(checkpoint_dir), is_pytorch=is_pytorch)
 
     logging.info("Loading model...")
     if is_pytorch:
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
+        model.training_rtc_max_prefix_steps = training_rtc["max_prefix_steps"] if training_rtc else None
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
@@ -159,6 +198,10 @@ def create_trained_policy(
         "checkpoint_dir": str(checkpoint_dir),
         "rtc_orientation": orientation_metadata,
     }
+    # Never trust a static capability copied into a preset: it belongs to the loaded checkpoint.
+    metadata.pop("training_rtc", None)
+    if training_rtc is not None:
+        metadata["training_rtc"] = training_rtc
 
     return _policy.Policy(
         model,

@@ -138,6 +138,10 @@ zip -r .venv/lib/python3.11/site-packages/transformers.zip .venv/lib/python3.11/
 cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/
 ```
 
+Training-RTC 推理需要支持逐动作位置时间条件的 Gemma 补丁；更新代码后，应在实际运行 server 的虚拟环境重新安装补丁并重启服务。
+Piper 的 `--training-rtc` 开关、模型能力校验、前缀协议及已知超时保持限制见 [Training-RTC 推理说明](docs/remote_inference.md#piper-tidy-desk-training-rtc-inference)。
+这是 client/server 推理支持；Training-RTC 训练实现位于 [SANE](https://github.com/Linux-2023/SANE)。
+
 #### 1. 模型转化
 首先，需要将预训练模型从jax格式转化为torch格式，以下例子是转化pi05_base的命令：
 

@@ -66,9 +66,27 @@ class Policy(BasePolicy):
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+        if "training_rtc" in obs:
+            _transforms.validate_training_rtc_payload(obs)
+            capability = self._metadata.get("training_rtc")
+            expected_capability = {
+                "supported": True,
+                "max_prefix_steps": 15,
+                "action_horizon": 50,
+                "action_dim": 14,
+            }
+            if not self._is_pytorch_model or capability != expected_capability:
+                raise ValueError("Training-RTC is unsupported or incompatible with this policy/checkpoint")
+            if any(
+                key in self._sample_kwargs
+                for key in ("rtc_orientation_guidance", "inference_delay", "prev_chunk_left_over", "execution_horizon")
+            ):
+                raise ValueError("Training-RTC cannot be combined with legacy RTC guidance")
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
+        if "training_rtc" in obs and "training_rtc" not in inputs:
+            raise ValueError("Policy input transforms discarded training_rtc")
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)

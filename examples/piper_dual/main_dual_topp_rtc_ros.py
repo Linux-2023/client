@@ -38,20 +38,27 @@ def build_arg_parser():
     parser.add_argument('--topp-gripper-acceleration', type=float, default=0.2, help='Gripper acceleration bound, m/s^2')
     parser.add_argument('--topp-prefetch-seconds', type=float, default=0.4,
                         help='Request the next chunk with this much planned motion remaining')
-    parser.add_argument('--topp-path-fps', type=float, default=15,
-                        help='Nominal path knot frequency, independent of output --fps')
+    parser.add_argument('--topp-path-fps', type=float, default=None,
+                        help='Model knot frequency: 30 Hz for Training-RTC, otherwise the legacy 15 Hz default')
     parser.add_argument('--topp-gridpoints', type=int, default=200)
     return parser
 
 
 def main(argv=None):
     ns = build_arg_parser().parse_args(argv)
+    if ns.topp_path_fps is None:
+        from openpi_client.action_chunk_broker import TRAINING_RTC_MODEL_FPS
+        ns.topp_path_fps = TRAINING_RTC_MODEL_FPS if ns.training_rtc else 15
     args = original.Args(**{key: getattr(ns, key) for key in original.Args.__dataclass_fields__})
     environment = policy = runtime = None
     try:
         original._validate_ros2_contract(args)
-        if not args.use_rtc or not args.use_async:
-            raise ValueError('This entrypoint requires --use-rtc and --use-async; use main_dual_topp_ros.py for non-RTC.')
+        if args.training_rtc:
+            ns.topp_rtc_backend = 'committed'
+        if not (args.training_rtc or args.use_rtc) or not args.use_async:
+            raise ValueError('This entrypoint requires RTC and --use-async; use main_dual_topp_ros.py for non-RTC.')
+        if args.training_rtc and not 0 <= args.actions_during_latency <= 15:
+            raise ValueError('Training-RTC prefix length must be between 0 and 15')
         if not 0 < args.action_horizon < ns.rtc_model_horizon or not 0 <= args.actions_during_latency < ns.rtc_model_horizon-args.action_horizon:
             raise ValueError('Require 0 < action horizon < model horizon and 0 <= delay < H-s')
         if args.fps <= 0 or args.num_steps <= 0 or args.num_episodes <= 0:
@@ -78,6 +85,7 @@ def main(argv=None):
                             metrics_path=args.out_dir/'topp_rtc_committed_metrics.jsonl',
                             model_horizon=ns.rtc_model_horizon,
                             actions_during_latency=args.actions_during_latency,
+                            training_rtc=args.training_rtc,
                             commit_seconds=ns.topp_commit_seconds, planning_margin=ns.topp_planning_margin,
                             plan_budget=ns.topp_plan_budget, soft_prefix_steps=ns.rtc_soft_prefix_steps)
             print('RTC committed prefix: background TOPP; exact scheduled handoff; short planning window')

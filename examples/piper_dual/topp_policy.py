@@ -113,6 +113,11 @@ class ToppPolicy:
         self.last_requested = False
         self.last_plan_ms = 0.0
 
+    def get_server_metadata(self):
+        getter = getattr(self.policy, 'get_server_metadata', None)
+        return getter() if callable(getter) else {}
+
+
     def _log(self, **event):
         logging.info('TOPP %s', event)
         if self.metrics_path:

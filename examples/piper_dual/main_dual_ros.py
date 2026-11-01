@@ -31,6 +31,7 @@ class Args:
 
     out_dir: Path = Path("data/piper_dual/videos")
     action_horizon: int = 22
+    handoff_blend_steps: int = 0
     fps: int = 15
     actions_during_latency: int = 5
     num_steps: int = 16000
@@ -46,6 +47,7 @@ class Args:
     port: int = 8000
     prompt: str = "Pass the playing cards and sunflower seeds to the guests."
     use_async: bool = True
+    training_rtc: bool = False
     use_rtc: bool = True
 
 
@@ -63,6 +65,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=Args.action_horizon,
         help="Number of actions retained from each remote action chunk",
     )
+    parser.add_argument("--handoff-blend-steps", type=int, default=Args.handoff_blend_steps,
+                        help="Blend this many adopted chunk steps from the last command; 0 disables")
     parser.add_argument("--fps", type=int, default=Args.fps, help="Runtime frame rate")
     parser.add_argument(
         "--actions-during-latency",
@@ -101,7 +105,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--publish-actions",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=Args.publish_actions,
         help="Allow validated actions to be published to ROS 2",
     )
@@ -126,6 +130,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=Args.use_rtc,
         help="Enable RTC mode in the asynchronous broker",
     )
+    parser.add_argument(
+        "--training-rtc", action=argparse.BooleanOptionalAction,
+        default=Args.training_rtc,
+        help="Select training-consistent RTC instead of legacy --use-rtc",
+    )
     return parser
 
 
@@ -134,12 +143,22 @@ def parse_args(argv: list[str] | None = None) -> Args:
 
 
 def _validate_ros2_contract(args: Args) -> None:
+    if not 0 <= args.handoff_blend_steps <= args.action_horizon:
+        raise ValueError("handoff-blend-steps must be between 0 and action-horizon")
+    if args.handoff_blend_steps and not args.use_async:
+        raise ValueError("handoff-blend-steps requires asynchronous execution")
     if args.publish_actions and args.dry_run:
         raise ValueError("--publish-actions requires --no-dry-run")
     if args.max_action_delta is not None and (
         not math.isfinite(args.max_action_delta) or args.max_action_delta < 0
     ):
         raise ValueError("--max-action-delta must be finite and non-negative")
+    if args.training_rtc and not args.use_async:
+        raise ValueError("Training-RTC requires --use-async")
+    if args.training_rtc and args.handoff_blend_steps:
+        raise ValueError("Training-RTC does not support handoff blending")
+    if args.training_rtc and not 0 <= args.actions_during_latency <= 15:
+        raise ValueError("Training-RTC actions-during-latency must be between 0 and 15")
 
 
 def contract_summary(args: Args) -> str:
@@ -153,7 +172,10 @@ def contract_summary(args: Args) -> str:
         f"- bridge_python={args.bridge_python}",
         f"- ros2_config={args.ros2_config}",
         f"- policy_server={args.host}:{args.port}",
+        f"- training_rtc={args.training_rtc}",
     ]
+    if args.training_rtc:
+        lines.append("- training_rtc supersedes legacy use_rtc and sends only training_rtc.action_prefix")
     if args.max_action_delta is not None:
         lines.append(f"- max_action_delta={args.max_action_delta}")
     return "\n".join(lines)
@@ -178,6 +200,12 @@ def _build_environment(args: Args) -> Ros2DualEnvironment:
 def _build_policy(args: Args) -> Any:
     from openpi_client import action_chunk_broker
     from openpi_client import websocket_client_policy
+    _validate_ros2_contract(args)
+    if args.training_rtc:
+        if args.fps != action_chunk_broker.TRAINING_RTC_MODEL_FPS:
+            raise ValueError("Training-RTC action rows require --fps 30")
+        if not 1 <= args.actions_during_latency <= action_chunk_broker.TRAINING_RTC_MAX_PREFIX:
+            raise ValueError("Training-RTC asynchronous commitment must contain 1 to 15 action rows")
 
     base_policy = websocket_client_policy.WebsocketClientPolicy(host=args.host, port=args.port)
     if args.use_async:
@@ -187,6 +215,11 @@ def _build_policy(args: Args) -> Any:
             fps=args.fps,
             actions_during_latency=args.actions_during_latency,
             use_rtc=args.use_rtc,
+            training_rtc=args.training_rtc,
+            trace_enabled=True,
+            handoff_blend_steps=args.handoff_blend_steps,
+            # Absolute joints are bounded positions, not periodic EEF Euler angles.
+            handoff_angle_indices=(),
         )
     return action_chunk_broker.ActionChunkBroker(
         policy=base_policy,
@@ -248,6 +281,8 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
         print("=" * 60)
         print("Dual-arm Piper PI05 - ROS 2 deployment")
         print("=" * 60)
+        # Reject unsupported Training-RTC servers before creating a ROS backend.
+        policy = _build_policy(args) if args.training_rtc else None
         print("\nInitializing ROS 2 environment...")
         environment = _build_environment(args)
         print("ROS 2 environment initialized")
@@ -257,7 +292,8 @@ def main(args: Args | argparse.Namespace | None = None) -> int:
         print(f"  publish_actions: {args.publish_actions}")
 
         print("\nConnecting to PI05 policy server...")
-        policy = _build_policy(args)
+        if policy is None:
+            policy = _build_policy(args)
         print("Policy server connected")
         print(f"  server: {args.host}:{args.port}")
 

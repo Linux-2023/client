@@ -1,7 +1,7 @@
 # 固定前缀的 RTC + TOPP 实验版
 
 `main_dual_topp_rtc_ros.py` 默认 `--topp-rtc-backend committed`。
-纯 RTC `main_dual_ros.py` 和非 RTC TOPP `main_dual_topp_ros.py` 未修改。
+普通关节 RTC 使用 `main_dual_ros.py`，非 RTC TOPP 使用 `main_dual_topp_ros.py`；训练期 clean-prefix RTC 与旧 `rtc_obs` 接口独立。
 旧 RTC policy 保留；修改前入口/说明备份在 `backups/topp_rtc_before_committed/`。
 
 ```bash
@@ -14,7 +14,21 @@ python examples/piper_dual/main_dual_topp_rtc_ros.py \
   --max-action-delta 20 --no-dry-run --publish-actions
 ```
 
-上面的发布开关会允许实机动作。本次开发仅离线测试，没有连接机器人或真实推理服务。
+上面的发布开关会允许实机动作，不是已验收的实机命令。以下保留历史开发记录；Training-RTC 的请求协议及已知限制见下一节。
+
+## Training-RTC clean-prefix 模式
+
+`main_dual_topp_rtc_ros.py --training-rtc --use-async` 选择 committed 后端。
+服务端必须声明 `training_rtc.supported=true`，支持 50×14 输出和最多 15 行绝对动作前缀。
+使用 30 Hz 模型时钟（可显式设置 `--topp-path-fps 30`）；请求字段为
+`training_rtc.action_prefix`，不发送旧 `rtc_obs`，不叠加 RTC gradient guidance。
+接缝位于模型行 `d` 时，前缀包含锚点行 `0..d`，因此 `d <= 14`，新目标从 `d+1` 开始。
+下文的 `s`、软前缀和旧 15 Hz 默认值描述不适用于该模式。
+
+安装、禁用动作发布的运行示例和已知超时保持问题见
+[Training-RTC 推理说明](../../docs/remote_inference.md#piper-tidy-desk-training-rtc-inference)。
+TOPP 的承诺窗口还包含规划时间并受 15 行前缀上限限制；修改延迟参数不能保证规划可行或实时接续。
+这些功能验证不代表机器人跟踪、碰撞安全或任务成功已通过验收。
 
 ## 与上一版不同
 

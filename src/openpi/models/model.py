@@ -105,6 +105,8 @@ class Observation(Generic[ArrayT]):
     token_ar_mask: at.Int[ArrayT, "*b l"] | None = None
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
+    # Clean action prefix for Training-RTC, normalized and padded like actions.
+    training_rtc_action_prefix: at.Float[ArrayT, "*b p ad"] | None = None
 
     # Previous state and action for RTC.
     prev_state: at.Float[ArrayT, "*b s"] | None = None
@@ -124,6 +126,9 @@ class Observation(Generic[ArrayT]):
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
             elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
                 data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+        training_rtc_action_prefix = None
+        if "training_rtc" in data:
+            training_rtc_action_prefix = data["training_rtc"]["action_prefix"]
         # Previous state and action for RTC.
         if "rtc_obs" in data:
             prev_state = data["rtc_obs"]["prev_state"]
@@ -143,6 +148,7 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            training_rtc_action_prefix=training_rtc_action_prefix,
             prev_state=prev_state,
             prev_action=prev_action,
             action_horizon=action_horizon,
@@ -153,6 +159,9 @@ class Observation(Generic[ArrayT]):
         """Convert the Observation to a nested dict."""
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
+        prefix = result.pop("training_rtc_action_prefix", None)
+        if prefix is not None:
+            result["training_rtc"] = {"action_prefix": prefix}
         result["image_mask"] = result.pop("image_masks")
         return result
 

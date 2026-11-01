@@ -2001,6 +2001,48 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
+    # Inference-only preset for the exported Piper Training-RTC 29999 checkpoint.
+    # Supports ordinary sampling and clean-prefix inference when checkpoint metadata confirms RTC training.
+    TrainConfig(
+        name="pi05_piper_dual_tidy_desk_ros2_shifted_pytorch",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            discrete_state_input=False,
+        ),
+        data=LeRobotPiperDataConfig(
+            repo_id="HITdongdong/piper_dual_tidy_desk_ros2_shifted",
+            base_config=DataConfig(prompt_from_task=True),
+            default_prompt="Tidy up the crumpled papers and pens on the desk.",
+            adapt_to_pi=False,
+            use_delta_joint_actions=True,
+            repack_transforms=_transforms.Group(inputs=[_transforms.RepackTransform({
+                "images": {
+                    "cam_high": "observation.images.cam_high",
+                    "cam_left_wrist": "observation.images.cam_left_wrist",
+                    "cam_right_wrist": "observation.images.cam_right_wrist",
+                },
+                "state": "observation.state",
+                "actions": "action",
+                "prompt": "prompt",
+            })]),
+        ),
+        batch_size=16,
+        num_workers=4,
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+        fsdp_devices=1,
+        policy_metadata={
+            "state_dim": 14,
+            "action_dim": 14,
+            "action_horizon": 50,
+            "action_representation": "absolute_joint_targets_with_absolute_grippers",
+            "discrete_state_input": False,
+            "trained_with_rtc": True,
+        },
+    ),
     #
     # RoboArena configs.
     #

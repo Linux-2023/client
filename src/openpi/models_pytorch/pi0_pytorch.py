@@ -25,12 +25,12 @@ def get_safe_dtype(target_dtype, device_type):
 def create_sinusoidal_pos_embedding(
     time: torch.tensor, dimension: int, min_period: float, max_period: float, device="cpu"
 ) -> Tensor:
-    """Computes sine-cosine positional embedding vectors for scalar positions."""
+    """Embed batch timesteps or per-action-position timesteps without changing scalar numerics."""
     if dimension % 2 != 0:
         raise ValueError(f"dimension ({dimension}) must be divisible by 2")
 
-    if time.ndim != 1:
-        raise ValueError("The time tensor is expected to be of shape `(batch_size, )`.")
+    if time.ndim not in (1, 2):
+        raise ValueError("The time tensor must have shape (batch_size,) or (batch_size, horizon).")
 
     dtype = get_safe_dtype(torch.float64, device.type)
     fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
@@ -38,8 +38,8 @@ def create_sinusoidal_pos_embedding(
 
     # Compute the outer product
     scaling_factor = 1.0 / period * 2 * math.pi
-    sin_input = scaling_factor[None, :] * time[:, None]
-    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+    sin_input = scaling_factor[None, :] * time[..., None]
+    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=-1)
 
 
 def sample_beta(alpha, beta, bsize, device):
@@ -86,6 +86,8 @@ class PI0Pytorch(nn.Module):
         super().__init__()
         self.config = config
         self.pi05 = config.pi05
+        # Enabled only after policy loading validates the checkpoint's recorded training contract.
+        self.training_rtc_max_prefix_steps = None
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -380,6 +382,24 @@ class PI0Pytorch(nn.Module):
     def sample_actions(self, device, observation, noise=None, num_steps=10, *, rtc_orientation_guidance=None) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = observation.state.shape[0]
+        action_prefix = getattr(observation, "training_rtc_action_prefix", None)
+        prefix_steps = 0
+        if action_prefix is not None:
+            if not self.pi05 or self.training_rtc_max_prefix_steps is None:
+                raise ValueError("Training-RTC requires a supported trained pi0.5 checkpoint")
+            if observation.prev_action is not None or rtc_orientation_guidance is not None:
+                raise ValueError("Training-RTC cannot be combined with legacy RTC guidance")
+            if (
+                not isinstance(action_prefix, Tensor)
+                or action_prefix.ndim != 3
+                or action_prefix.shape[0] != bsize
+                or action_prefix.shape[2] != self.config.action_dim
+                or action_prefix.shape[1] > self.training_rtc_max_prefix_steps
+            ):
+                raise ValueError("Training-RTC prefix must have shape (batch, P <= 15, model_action_dim)")
+            if not action_prefix.is_floating_point() or not torch.isfinite(action_prefix).all():
+                raise ValueError("Training-RTC prefix must contain finite floating-point actions")
+            prefix_steps = action_prefix.shape[1]
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
@@ -406,16 +426,18 @@ class PI0Pytorch(nn.Module):
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
 
         x_t = noise
+        if prefix_steps:
+            action_prefix = action_prefix.to(device=noise.device, dtype=noise.dtype)
+            if not torch.isfinite(action_prefix).all():
+                raise ValueError("Training-RTC prefix is not finite in the sampling dtype")
+            x_t = noise.clone()
+            x_t[:, :prefix_steps] = action_prefix
         time = torch.tensor(1.0, dtype=torch.float32, device=device)
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
-            # v_t = self.denoise_step(
-            #     state,
-            #     prefix_pad_masks,
-            #     past_key_values,
-            #     x_t,
-            #     expanded_time,
-            # )
+            if prefix_steps:
+                expanded_time = time.expand(bsize, self.config.action_horizon).clone()
+                expanded_time[:, :prefix_steps] = 0
 
             def denoise_step_partial_call(input_x_t, current_timestep=expanded_time):
                 return self.denoise_step(
@@ -459,6 +481,9 @@ class PI0Pytorch(nn.Module):
             
             # Euler step - use new tensor assignment instead of in-place operation
             x_t = x_t + dt * v_t
+            if prefix_steps:
+                # Prefix tokens are clean conditioning, never integrated or gradient-guided.
+                x_t[:, :prefix_steps] = action_prefix
             time += dt
         if prev_action is not None:
             error = prev_action[0, :actions_during_latency, ...] - x_t[0, :actions_during_latency, ...]

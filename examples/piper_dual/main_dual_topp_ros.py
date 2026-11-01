@@ -32,6 +32,8 @@ def main(argv=None):
     environment = policy = runtime = None
     try:
         original._validate_ros2_contract(args)
+        if args.training_rtc:
+            raise ValueError('Training-RTC with TOPP requires main_dual_topp_rtc_ros.py (committed scheduling).')
         if args.use_rtc:
             raise ValueError('TOPP changes chunk timing; RTC index semantics are unsupported. Use --no-use-rtc.')
         if args.fps <= 0 or args.num_steps <= 0 or args.num_episodes <= 0:

@@ -36,6 +36,36 @@ class DataTransformFn(Protocol):
         """
 
 
+TRAINING_RTC_MAX_PREFIX_STEPS = 15
+TRAINING_RTC_ACTION_DIM = 14
+
+
+def validate_training_rtc_payload(
+    data: Mapping,
+    *,
+    max_prefix_steps: int = TRAINING_RTC_MAX_PREFIX_STEPS,
+    action_dim: int = TRAINING_RTC_ACTION_DIM,
+) -> np.ndarray | None:
+    """Validate the wire-level clean-prefix payload before model sampling."""
+    if "training_rtc" not in data:
+        return None
+    payload = data["training_rtc"]
+    if not isinstance(payload, Mapping) or set(payload) != {"action_prefix"}:
+        raise ValueError("training_rtc must contain exactly an action_prefix field")
+    if any(key in data for key in ("rtc_obs", "prev_action", "gpr_prev_action")):
+        raise ValueError("training_rtc cannot be combined with legacy RTC or GPR payloads")
+    prefix = np.asarray(payload["action_prefix"])
+    if prefix.dtype != np.dtype(np.float32):
+        raise ValueError("training_rtc.action_prefix must have dtype float32")
+    if prefix.ndim != 2 or prefix.shape[1] != action_dim:
+        raise ValueError(f"training_rtc.action_prefix must have shape (P, {action_dim})")
+    if prefix.shape[0] > max_prefix_steps:
+        raise ValueError(f"training_rtc.action_prefix exceeds the maximum of {max_prefix_steps} steps")
+    if not np.isfinite(prefix).all():
+        raise ValueError("training_rtc.action_prefix must contain only finite values")
+    return prefix
+
+
 @dataclasses.dataclass(frozen=True)
 class Group:
     """A group of transforms."""
@@ -127,6 +157,16 @@ class Normalize(DataTransformFn):
         if self.norm_stats is None:
             return data
             
+        if "training_rtc" in data:
+            training_rtc_stats = self.norm_stats.copy()
+            training_rtc_stats["training_rtc"] = {"action_prefix": self.norm_stats["actions"]}
+            return apply_tree(
+                data,
+                training_rtc_stats,
+                self._normalize_quantile if self.use_quantiles else self._normalize,
+                strict=self.strict,
+            )
+
         if "rtc_obs" in data:
             rtc_norm_stats = self.norm_stats.copy()
             rtc_norm_stats["rtc_obs"] = {
@@ -443,14 +483,20 @@ class DeltaActions(DataTransformFn):
     mask: Sequence[bool] | None
 
     def __call__(self, data: DataDict) -> DataDict:
-        if "actions" not in data or self.mask is None:
+        if ("actions" not in data and "training_rtc" not in data) or self.mask is None:
             return data
 
-        state, actions = data["state"], data["actions"]
+        state = data["state"]
         mask = np.asarray(self.mask)
         dims = mask.shape[-1]
-        actions[..., :dims] -= np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
-        data["actions"] = actions
+        anchor = np.expand_dims(np.where(mask, state[..., :dims], 0), axis=-2)
+        if "actions" in data:
+            data["actions"][..., :dims] -= anchor
+
+        if "training_rtc" in data:
+            prefix = data["training_rtc"]["action_prefix"].copy()
+            prefix[..., :dims] -= anchor
+            data["training_rtc"]["action_prefix"] = prefix
 
         return data
 
@@ -599,6 +645,10 @@ class PadStatesAndActions(DataTransformFn):
         data["state"] = pad_to_dim(data["state"], self.model_action_dim, axis=-1)
         if "actions" in data:
             data["actions"] = pad_to_dim(data["actions"], self.model_action_dim, axis=-1)
+        if "training_rtc" in data:
+            data["training_rtc"]["action_prefix"] = pad_to_dim(
+                data["training_rtc"]["action_prefix"], self.model_action_dim, axis=-1
+            )
         return data
 
 @dataclasses.dataclass(frozen=True)

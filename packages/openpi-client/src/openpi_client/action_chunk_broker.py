@@ -1,6 +1,8 @@
 from typing import Dict, Tuple, List
 import threading
 from collections import deque
+from concurrent.futures import Future
+import copy
 import atexit
 import math
 
@@ -14,6 +16,32 @@ import matplotlib.pyplot as plt
 from openpi_client import base_policy as _base_policy
 import time
 
+
+TRAINING_RTC_MAX_PREFIX = 15
+TRAINING_RTC_ACTION_HORIZON = 50
+TRAINING_RTC_ACTION_DIM = 14
+TRAINING_RTC_MODEL_FPS = 30
+
+
+def validate_training_rtc_capability(metadata: Dict) -> Dict:
+    """Validate the live server capability required by Training-RTC."""
+    capability = metadata.get("training_rtc") if isinstance(metadata, dict) else None
+    if not isinstance(capability, dict):
+        raise ValueError("Training-RTC requested but server metadata has no training_rtc capability")
+    expected = {
+        "supported": True,
+        "max_prefix_steps": TRAINING_RTC_MAX_PREFIX,
+        "action_horizon": TRAINING_RTC_ACTION_HORIZON,
+        "action_dim": TRAINING_RTC_ACTION_DIM,
+    }
+    mismatches = {
+        key: (capability.get(key), value)
+        for key, value in expected.items()
+        if capability.get(key) != value or (key == 'supported' and capability.get(key) is not True)
+    }
+    if mismatches:
+        raise ValueError(f"Unsupported Training-RTC capability: {mismatches}")
+    return capability
 
 class _ChunkTrace:
     """Track adopted chunks separately from policy tensors; callers hold their broker lock."""
@@ -138,7 +166,7 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
     _instances = []  # Class-level list to track all instances
     _atexit_registered = False  # Flag to ensure atexit is only registered once
 
-    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int, fps: int = 30, actions_during_latency: int = 1, use_rtc: bool = True, *, trace_enabled: bool = False, handoff_blend_steps: int = 0):
+    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int, fps: int = 30, actions_during_latency: int = 1, use_rtc: bool = True, *, training_rtc: bool = False, trace_enabled: bool = False, handoff_blend_steps: int = 0, handoff_angle_indices: Tuple[int, ...] = (3, 4, 5, 10, 11, 12)):
         self._policy = policy
         self._max_horizon = 50
         self._action_dim = 14
@@ -148,6 +176,7 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
         self._avg_latency_ms: float = 0.0  # Average latency in milliseconds
         self._actions_during_latency = actions_during_latency  # Number of actions executed during avg latency
         self._handoff_blend_steps = max(0, int(handoff_blend_steps))
+        self._handoff_angle_indices = np.asarray(handoff_angle_indices, dtype=int)
         self._actions_during_latency_realtime: int = 0  # Number of actions executed during avg latency
         self._cur_step: int = 0
 
@@ -161,9 +190,25 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
         self._inference_thread: threading.Thread | None = None
         self._should_stop = False
 
-        self._use_rtc = use_rtc
-        self._trace = _ChunkTrace(action_horizon, actions_during_latency, use_rtc) if trace_enabled else None
-
+        self._use_rtc = use_rtc and not training_rtc
+        self._training_rtc = bool(training_rtc)
+        self._training_io_lock = threading.Lock()
+        self._training_future = None
+        self._training_job = None
+        self._training_tick = 0
+        self._training_request_at = 0
+        self._training_needs_reset = False
+        if self._training_rtc:
+            validate_training_rtc_capability(self.get_server_metadata())
+            if self._fps != TRAINING_RTC_MODEL_FPS:
+                raise ValueError("Training-RTC action rows must execute at the trained 30 Hz model rate")
+            if handoff_blend_steps != 0:
+                raise ValueError("Training-RTC does not support handoff blending")
+            if not 1 <= self._action_horizon < TRAINING_RTC_ACTION_HORIZON:
+                raise ValueError("Training-RTC action horizon must be in [1, 49]")
+            if not 1 <= self._actions_during_latency <= TRAINING_RTC_MAX_PREFIX:
+                raise ValueError("Training-RTC committed prefix length must be between 1 and 15")
+        self._trace = _ChunkTrace(action_horizon, actions_during_latency, use_rtc or training_rtc) if trace_enabled else None
         # Full previous chunk actions for GPR conditioning (non-RTC async mode).
         # Mirrors ActionChunkBroker._prev_full_actions.
         self._prev_full_actions: np.ndarray | None = None
@@ -176,11 +221,126 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
         self._chunk_boundaries: List[int] = []  # Store step indices where new chunks start
         self._chunk_action_records: List[Dict[str, np.ndarray | int]] = []  # Keep full chunk outputs and overlaps
 
-    
     def get_server_metadata(self) -> Dict:
         """Expose server provenance when the wrapped policy provides it."""
         get_metadata = getattr(self._policy, "get_server_metadata", None)
         return get_metadata() if callable(get_metadata) else {}
+
+    def _validate_training_actions(self, result: Dict) -> np.ndarray:
+        actions = np.asarray(result.get("actions"), dtype=np.float32)
+        if actions.shape != (TRAINING_RTC_ACTION_HORIZON, TRAINING_RTC_ACTION_DIM):
+            raise ValueError(
+                "Training-RTC server must return "
+                f"({TRAINING_RTC_ACTION_HORIZON},{TRAINING_RTC_ACTION_DIM}) actions"
+            )
+        if not np.isfinite(actions).all():
+            raise ValueError("Training-RTC server returned non-finite actions")
+        return actions
+
+    def _training_payload(self, obs: Dict, prefix: np.ndarray) -> Dict:
+        payload = copy.deepcopy(obs)
+        payload.pop("rtc_obs", None)
+        payload.pop("prev_action", None)
+        payload["training_rtc"] = {"action_prefix": prefix.astype(np.float32, copy=True)}
+        return payload
+    def _start_training_request(self, obs: Dict) -> None:
+        prefix_steps = self._actions_during_latency
+        if prefix_steps:
+            indices = np.minimum(
+                np.arange(self._cur_step, self._cur_step + prefix_steps),
+                self._max_horizon - 1,
+            )
+            prefix = self._last_results['actions'][indices]
+        else:
+            prefix = np.empty((0, self._action_dim), dtype=np.float32)
+        payload = self._training_payload(obs, prefix)
+        self._training_job = (self._training_tick + prefix_steps, prefix_steps)
+        future = self._training_future = Future()
+
+        def work() -> None:
+            begin = time.monotonic()
+            try:
+                with self._training_io_lock:
+                    result = self._policy.infer(payload)
+                actions = self._validate_training_actions(result)
+                future.set_result(({**result, 'actions': actions}, (time.monotonic() - begin) * 1000))
+            except BaseException as exc:
+                future.set_exception(exc)
+
+        self._inference_thread = threading.Thread(
+            target=work, daemon=True, name="training-rtc-inference"
+        )
+        self._inference_thread.start()
+
+
+    def _adopt_training_result(self, result: Dict, skip: int, inference_ms: float) -> None:
+        self._last_results = result
+        self._cur_step = skip
+        self._training_request_at = self._training_tick + self._action_horizon
+        self._infer_latency.append(inference_ms)
+        self._chunk_boundaries.append(len(self._action_history))
+        if self._trace is not None:
+            self._trace.adopt(skip, inference_ms)
+
+    def _infer_training_rtc(self, obs: Dict) -> Dict:
+        """Keep committed rows until the exact handoff; never replay the prefix."""
+        with self._lock:
+            if self._last_results is None:
+                begin = time.monotonic()
+                payload = self._training_payload(obs, np.empty((0, self._action_dim), dtype=np.float32))
+                with self._training_io_lock:
+                    if self._training_needs_reset:
+                        self._policy.reset()
+                        self._training_needs_reset = False
+                    initial = self._policy.infer(payload)
+                initial = {**initial, 'actions': self._validate_training_actions(initial)}
+                self._adopt_training_result(initial, 0, (time.monotonic() - begin) * 1000)
+
+            if self._training_future is not None and self._training_future.done():
+                # Keep failures latched on the Future until reset. Never fall
+                # back to legacy guidance or continue silently after an error.
+                result, inference_ms = self._training_future.result()
+                deadline, prefix_steps = self._training_job
+                if self._training_tick >= deadline:
+                    if self._training_tick == deadline:
+                        self._adopt_training_result(result, prefix_steps, inference_ms)
+                    # A late result has no valid execution anchor. Discard it
+                    # and request again from the current old plan/hold below.
+                    self._training_future = self._training_job = None
+
+            if self._training_future is None and self._training_tick >= self._training_request_at:
+                self._start_training_request(obs)
+
+            selected_step = min(self._cur_step, self._max_horizon - 1)
+
+            def select(value):
+                if isinstance(value, np.ndarray) and value.ndim and value.shape[0] == self._max_horizon:
+                    return value[selected_step].copy()
+                return value
+
+            result = tree.map_structure(select, self._last_results)
+            if self._trace is not None:
+                result['_chunk_trace'] = self._trace.select(selected_step)
+            self._action_history.append(result['actions'].copy())
+            self._prev_returned_action = {'actions': result['actions'].copy()}
+            self._cur_step += 1
+            self._training_tick += 1
+            return result
+
+    def _reset_training_rtc(self) -> None:
+        with self._lock:
+            self._training_future = self._training_job = None
+            self._training_tick = self._training_request_at = self._cur_step = 0
+            self._last_results = self._prev_returned_action = None
+            # Serialize reset with an old in-flight request on the next cold
+            # call, avoiding websocket recv races without blocking reset itself.
+            self._training_needs_reset = True
+            self._infer_latency.clear()
+            self._action_history.clear()
+            self._chunk_boundaries.clear()
+            self._chunk_action_records.clear()
+            if self._trace is not None:
+                self._trace.reset()
 
     def _record_chunk_actions(self, results: Dict, overlap_steps: int) -> None:
         """Persist raw chunk actions along with overlap metadata."""
@@ -221,7 +381,7 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
         if previous.shape != (self._action_dim,):
             return blended
         count = min(self._handoff_blend_steps, max(0, actions.shape[0] - start_step))
-        angle_indices = np.array([3, 4, 5, 10, 11, 12])
+        angle_indices = self._handoff_angle_indices
         for offset in range(count):
             index = start_step + offset
             alpha = (offset + 1) / count
@@ -679,6 +839,8 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
 
     @override
     def infer(self, obs: Dict) -> Dict:  # noqa: UP006
+        if self._training_rtc:
+            return self._infer_training_rtc(obs)
         with self._lock:
             # Store the latest observation
             self._last_obs = obs
@@ -813,6 +975,9 @@ class ActionChunkBroker_RTC(_base_policy.BasePolicy):
 
     @override
     def reset(self) -> None:
+        if self._training_rtc:
+            self._reset_training_rtc()
+            return
         with self._lock:
             self._should_stop = True
             # Wait for inference thread to complete if running
